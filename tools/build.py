@@ -2,6 +2,7 @@
 """Build the standalone x86_64 Lilu plugin and donor symbol provider."""
 import argparse,hashlib,json,plistlib,subprocess
 from pathlib import Path
+from check_compat_version import check as check_compat_version
 ROOT=Path(__file__).resolve().parents[1]
 def run(cmd): subprocess.run([str(x) for x in cmd],check=True,cwd=ROOT)
 def main():
@@ -45,6 +46,7 @@ def main():
    # Keep the native policy class, scoped to its Intel client and independent of SMBIOS.
    info['IOKitPersonalities']=plistlib.loads((ROOT/'AppleIntelTGLCompat/GraphicsPolicy.plist').read_bytes())
   (bundle/'Info.plist').write_bytes(plistlib.dumps(info))
+  if name=='AppleIntelTGLCompat':check_compat_version(bundle/'Info.plist')
   # Preserve DWARF before removing the linker's object-path records.
   if name=='WhateverXe':run(['xcrun','dsymutil',exe,'-o',out/(name+'.kext.dSYM')])
   run(['xcrun','strip','-S',exe])
