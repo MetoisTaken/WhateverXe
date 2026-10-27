@@ -4439,7 +4439,11 @@ bool XE::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t add
 			return processAlderLakeNLoadOnly(patcher, index, address, size);
 		return processTGLAccelerator(patcher, index, address, size);
 	}
-	return processKextFull(patcher, index, address, size);
+	// Render must not retain the Display12 framebuffer installer's large
+	// stack frame while entering the accelerator installer in DEBUG builds.
+	if (tglRequested && tglActive && currentGraphics && currentGraphics->loadIndex == index)
+		return processTGLAccelerator(patcher, index, address, size);
+	return false;
 }
 
 static bool adlnWriterMappingBound();
@@ -12582,8 +12586,6 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
    tglRecordStartOrder(1,nullptr);
 			return true;
 		}
-		if (currentGraphics->loadIndex == index)
-			return processTGLAccelerator(patcher, index, address, size);
 		return false;
 	}
 	return false;
