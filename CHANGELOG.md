@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1
+
+Use the latest [WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics/releases) package. This patch release does not add GPU IDs.
+
+- Fix DEBUG startup failures by reusing display-state storage and reducing bootstrap stack usage, while retaining unoptimized DEBUG builds. The same storage change applies to RELEASE.
+- Add an experimental internal eDP path for already supported Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U GPUs: one firmware-described Combo A/B panel with PPS0 and PCH PWM brightness. This path has not been tested on physical hardware.
+- Share panel setup with the existing Tiger Lake path and update the bundled Compat source to expose the panel capability.
+- Check generated Compat dependency versions during builds; preserve the 0.5.0 compatibility floor.
+
+WhateverXe Graphics 0.3.2 includes the corresponding Compat build and fixes the observed six-bank OpenGL URB allocation errors. Existing display limitations remain documented in the [README](https://github.com/b00t0x/WhateverXe#tested-features-and-known-issues).
+
 ## 0.6.0
 
 Use the latest [WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics/releases) package.
