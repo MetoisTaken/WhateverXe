@@ -11840,134 +11840,8 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 				patcher.clearError();
 			}
 
-			if (tglActive) {
-				// The donor copies a complete timing before this callback, then maps
-				// its depth and computes lanes/M/N/dither. Clamp that copy, never an
-				// already-running plane or the framebuffer's pixel format.
-				const char *symbol="__ZN31AppleIntelFramebufferController21configureModeSetHooksEP21AppleIntelFramebufferP29IODetailedTimingInformationV2";
-				const uint8_t entry[]={0x55,0x48,0x89,0xE5,0x41,0x56,0x53,0x49,0x89,0xD6,0x48,0x89,0xF3,0x48,0xFF,0x05,0xA2,0xF7,0x08,0x00};
-				const uint8_t call[]={0x4C,0x89,0xF6,0x48,0x89,0xDA,0xE8,0x24,0x07,0x00,0x00};
-				const auto target=patcher.solveSymbol(index,symbol,address,size);
-				const bool known=size>0x50420 && target==address+0x50142 &&
-					!memcmp(reinterpret_cast<void *>(target),entry,sizeof(entry)) &&
-					!memcmp(reinterpret_cast<void *>(address+0x4FA13),call,sizeof(call));
-				KernelPatcher::RouteRequest route(symbol,wrapTGLModeTiming,orgTGLModeTiming);
-				tglPanelDepthReady=known && patcher.routeMultiple(index,&route,1,address,size);
-				IORegistryEntry::getRegistryRoot()->setProperty("TGLPanelDepthReady",tglPanelDepthReady);
-				patcher.clearError();
-			}
+            processNativePanel(patcher,index,address,size);
 
-   if(tglActive) {
-    // PANEL_TIMING_INSTALL: exact property writer and its native consumer.
-    const char *symbol="__ZN31AppleIntelFramebufferController26hwGetPanelTimingPropertiesEv";
-    const uint8_t entry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x50,0x48,0x89,0xfb,0x48,0xff,0x05,0x08,0x60,0x09,0x00};
-    const uint8_t call[]={0xe8,0xb5,0x4c,0x00,0x00,0x8b,0x93,0x48,0x15,0x00,0x00};
-    const auto target=patcher.solveSymbol(index,symbol,address,size);
-    const auto config=patcher.solveSymbol(index,"__ZN31AppleIntelFramebufferController21hwSetPanelPowerConfigEj",address,size);
-    const bool known=size>=0x48651 && target==address+0x4848c && config==address+0x437a6 &&
-     !memcmp(reinterpret_cast<void *>(target),entry,sizeof(entry)) &&
-     !memcmp(reinterpret_cast<void *>(address+0x437d2),call,sizeof(call));
-    KernelPatcher::RouteRequest routes[] {
-     {symbol,wrapTGLPanelTiming,orgTGLPanelTiming},
-     {"__ZN31AppleIntelFramebufferController21hwSetPanelPowerConfigEj",wrapTGLPanelConfig,orgTGLPanelConfig}
-    };
-    tglPanelTimingReady=known && patcher.routeMultiple(index,routes,2,address,size);
-    IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTimingReady",tglPanelTimingReady);
-    patcher.clearError();
-    // PANEL_TIMING_INSTALL_END
-   }
-
-   if(adlsDisplaySelected) {
-    // ADLS_PANEL_PWM_INSTALL: preflight the native lifecycle and PWM enable site.
-    const char *light="__ZN31AppleIntelFramebufferController10LightUpEDPEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2";
-    const char *brightness="__ZN31AppleIntelFramebufferController14hwSetBacklightEj";
-    const uint8_t lightEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50,0x49,0x89,0xcf};
-    const uint8_t brightnessEntry[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x48,0xff,0x05,0x90,0x44,0x09,0x00};
-    const uint8_t enable[]={0xbe,0x50,0x82,0x0c,0x00,0xba,0x00,0x00,0x00,0x80,0xff,0x90,0x30,0x01,0x00,0x00};
-    const auto lightFn=patcher.solveSymbol(index,light,address,size);
-    const auto brightnessFn=patcher.solveSymbol(index,brightness,address,size);
-    const bool known=size>=0x508c4 && lightFn==address+0x5063e && brightnessFn==address+0x4a56a &&
-     !memcmp(reinterpret_cast<void *>(lightFn),lightEntry,sizeof(lightEntry)) &&
-     !memcmp(reinterpret_cast<void *>(brightnessFn),brightnessEntry,sizeof(brightnessEntry)) &&
-     !memcmp(reinterpret_cast<void *>(address+0x507e9),enable,sizeof(enable));
-    KernelPatcher::RouteRequest routes[] {{light,wrapADLSLightUpEDP,orgADLSLightUpEDP},
-     {brightness,wrapADLSPanelBacklight,orgADLSPanelBacklight}};
-    if(known && patcher.routeMultiple(index,routes,2,address,size)) {
-     uint8_t bridge[]={0x48,0xb8,0,0,0,0,0,0,0,0,0xff,0xd0,0x90,0x90,0x90,0x90};
-     const auto handler=reinterpret_cast<uintptr_t>(wrapADLSPanelPWMEnable);memcpy(bridge+2,&handler,sizeof(handler));
-     patcher.routeBlock(address+0x507e9,bridge,sizeof(bridge));
-     adlsPanelPWMReady=patcher.getError()==KernelPatcher::Error::NoError &&
-      !memcmp(reinterpret_cast<void *>(address+0x507e9),bridge,sizeof(bridge));
-    }
-    IORegistryEntry::getRegistryRoot()->setProperty("ADLSPanelPWMReady",adlsPanelPWMReady);
-    patcher.clearError();
-    // ADLS_PANEL_PWM_INSTALL_END
-   }
-
-			if (tglActive) {
-				// TGL/Xe-LP has no dedicated eDP transcoder. Keep the allocated
-				// pipe (or getTranscoderOffset's pipe argument), including when
-				// an eDP port is present. External DP/HDMI branches are unchanged.
-				// Linux v6.12: XE_D_DISPLAY and intel_ddi_compute_config().
-				// Preflight every site before modifying this exact donor image.
-				struct EDPTranscoderSite {
-					const char *symbol; uint32_t function, offset; uint8_t length, expected[6];
-				};
-				static const EDPTranscoderSite sites[] {
-					// SetupParams must also select a clock for eDP, using DDI+1.
-					{"__ZN31AppleIntelFramebufferController11SetupParamsEP21AppleIntelFramebufferP21AppleIntelDisplayPathP10CRTCParamsPK29IODetailedTimingInformationV2",0x4E758,0x4E7A3,2,{0x74,0x3F}},
-					{"__ZN31AppleIntelFramebufferController10enablePipeEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",0x48BB6,0x48E38,6,{0x41,0xBC,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController12setColorModeEP21AppleIntelFramebufferP21AppleIntelDisplayPathjjbPK29IODetailedTimingInformationV2",0x491F2,0x493C6,6,{0x41,0xBC,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController19getTranscoderOffsetEP14AppleIntelPortjj",0x49538,0x4956C,5,{0xB8,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController35hwCRTCToIODetailedTimingInformationEP21AppleIntelFramebufferP29IODetailedTimingInformationV2",0x49D46,0x49EAA,5,{0xBB,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController15hwWaitForVBlankEP21AppleIntelFramebufferj",0x4AE1E,0x4AF0E,5,{0xBE,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController28hwWaitForEndOfVerticalActiveEP21AppleIntelFramebufferj",0x4CBEC,0x4CCDE,5,{0xBE,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController14disableDisplayEP21AppleIntelFramebufferP21AppleIntelDisplayPathh",0x4D34C,0x4D705,5,{0xB9,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController12hwDisableVRREP21AppleIntelFramebufferb",0x4DD68,0x4DF95,5,{0xBB,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController12hwDisableVRREP21AppleIntelFramebufferb",0x4DD68,0x4E165,5,{0xBB,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController12hwDisableVRREP21AppleIntelFramebufferb",0x4DD68,0x4E2AF,5,{0xBB,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController12hwDisableVRREP21AppleIntelFramebufferb",0x4DD68,0x4E439,5,{0xBB,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController33isVSCSDPSetForRequiredColorimetryEP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",0x4F32E,0x4F3B0,5,{0xBE,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController11hwEnableVRREP21AppleIntelFramebufferPK29IODetailedTimingInformationV2",0x4F586,0x4F77F,6,{0x41,0xBC,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController13disableVSCDIPEP21AppleIntelFramebufferP21AppleIntelDisplayPath",0x5248C,0x5252B,5,{0xBB,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController18disableDRMDIPforDPEP21AppleIntelFramebufferP21AppleIntelDisplayPath",0x52576,0x52615,5,{0xBB,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController18disableAVIDIPforDPEP21AppleIntelFramebufferP21AppleIntelDisplayPath",0x5265E,0x526FD,5,{0xBB,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController12enableVSCDIPEP21AppleIntelFramebufferP21AppleIntelDisplayPathhhj",0x5298C,0x52A6D,5,{0xBB,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController25setVSCSDPForPixelEncodingEP21AppleIntelFramebufferP21AppleIntelDisplayPathhhj",0x576C8,0x5776D,5,{0xBE,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController17enableAVIDIPforDPEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",0x57984,0x57A42,6,{0x41,0xBF,0x0F,0x00,0x00,0x00}},
-					{"__ZN31AppleIntelFramebufferController17enableDRMDIPforDPEP21AppleIntelFramebufferP21AppleIntelDisplayPatht",0x57BDA,0x57CD8,6,{0x41,0xBD,0x0F,0x00,0x00,0x00}},
-				};
-				static const uint8_t noOverride[] {0x90,0x90,0x90,0x90,0x90,0x90};
-				static const uint8_t timingExpected[] {0x48,0x8B,0x0D,0x48,0x47,0x09,0x00,0x48,0x8D,0x41,0x01,0x48,0x89,0x05,0x3D,0x47,0x09,0x00};
-				static const uint8_t timingReplacement[] {0x85,0xC0,0x0F,0x84,0xD3,0xFE,0xFF,0xFF,0x48,0x8B,0x0D,0x40,0x47,0x09,0x00,0x90,0x90,0x90};
-				// N=0 means no usable DP timing. Reuse native zero-output and
-				// lock-release handling, rather than inventing a clock or divisor.
-				static const uint8_t zeroExit[] {0xBE,0xA0,0x00,0x00,0x00,0x4C,0x89,0xFF};
-				bool ready = size > 0x57CDE &&
-					!memcmp(reinterpret_cast<void *>(address+0x49EE9),timingExpected,sizeof(timingExpected)) &&
-					!memcmp(reinterpret_cast<void *>(address+0x49DC4),zeroExit,sizeof(zeroExit));
-				for (const auto &site : sites) {
-					if (!ready) break;
-					ready = patcher.solveSymbol(index,site.symbol,address,size)==address+site.function &&
-						!memcmp(reinterpret_cast<void *>(address+site.offset),site.expected,site.length);
-				}
-				if (ready) {
-					for (const auto &site : sites) {
-						patcher.routeBlock(address+site.offset,noOverride,site.length);
-						ready = patcher.getError()==KernelPatcher::Error::NoError &&
-							!memcmp(reinterpret_cast<void *>(address+site.offset),noOverride,site.length);
-						if (!ready) break;
-					}
-					if (ready) {
-						patcher.routeBlock(address+0x49EE9,timingReplacement,sizeof(timingReplacement));
-						ready = patcher.getError()==KernelPatcher::Error::NoError &&
-							!memcmp(reinterpret_cast<void *>(address+0x49EE9),timingReplacement,sizeof(timingReplacement));
-					}
-				}
-				tglEDPTranscoderReady = ready;
-				IORegistryEntry::getRegistryRoot()->setProperty("TGLEDPTranscoderReady",ready);
-				patcher.clearError();
-			}
 			if (tglActive) {
 
 				if (framebufferPatchFlags.bits.FPFStolenMemorySize) {
@@ -12695,6 +12569,139 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 		return false;
 	}
 	return false;
+}
+
+// Shared exact-donor panel corrections; physical adapters own admission.
+void XE::processNativePanel(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+
+			if (tglActive) {
+				// The donor copies a complete timing before this callback, then maps
+				// its depth and computes lanes/M/N/dither. Clamp that copy, never an
+				// already-running plane or the framebuffer's pixel format.
+				const char *symbol="__ZN31AppleIntelFramebufferController21configureModeSetHooksEP21AppleIntelFramebufferP29IODetailedTimingInformationV2";
+				const uint8_t entry[]={0x55,0x48,0x89,0xE5,0x41,0x56,0x53,0x49,0x89,0xD6,0x48,0x89,0xF3,0x48,0xFF,0x05,0xA2,0xF7,0x08,0x00};
+				const uint8_t call[]={0x4C,0x89,0xF6,0x48,0x89,0xDA,0xE8,0x24,0x07,0x00,0x00};
+				const auto target=patcher.solveSymbol(index,symbol,address,size);
+				const bool known=size>0x50420 && target==address+0x50142 &&
+					!memcmp(reinterpret_cast<void *>(target),entry,sizeof(entry)) &&
+					!memcmp(reinterpret_cast<void *>(address+0x4FA13),call,sizeof(call));
+				KernelPatcher::RouteRequest route(symbol,wrapTGLModeTiming,orgTGLModeTiming);
+				tglPanelDepthReady=known && patcher.routeMultiple(index,&route,1,address,size);
+				IORegistryEntry::getRegistryRoot()->setProperty("TGLPanelDepthReady",tglPanelDepthReady);
+				patcher.clearError();
+			}
+
+   if(tglActive) {
+    // PANEL_TIMING_INSTALL: exact property writer and its native consumer.
+    const char *symbol="__ZN31AppleIntelFramebufferController26hwGetPanelTimingPropertiesEv";
+    const uint8_t entry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x50,0x48,0x89,0xfb,0x48,0xff,0x05,0x08,0x60,0x09,0x00};
+    const uint8_t call[]={0xe8,0xb5,0x4c,0x00,0x00,0x8b,0x93,0x48,0x15,0x00,0x00};
+    const auto target=patcher.solveSymbol(index,symbol,address,size);
+    const auto config=patcher.solveSymbol(index,"__ZN31AppleIntelFramebufferController21hwSetPanelPowerConfigEj",address,size);
+    const bool known=size>=0x48651 && target==address+0x4848c && config==address+0x437a6 &&
+     !memcmp(reinterpret_cast<void *>(target),entry,sizeof(entry)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x437d2),call,sizeof(call));
+    KernelPatcher::RouteRequest routes[] {
+     {symbol,wrapTGLPanelTiming,orgTGLPanelTiming},
+     {"__ZN31AppleIntelFramebufferController21hwSetPanelPowerConfigEj",wrapTGLPanelConfig,orgTGLPanelConfig}
+    };
+    tglPanelTimingReady=known && patcher.routeMultiple(index,routes,2,address,size);
+    IORegistryEntry::getRegistryRoot()->setProperty("WEXPanelTimingReady",tglPanelTimingReady);
+    patcher.clearError();
+    // PANEL_TIMING_INSTALL_END
+   }
+
+   if(adlsDisplaySelected) {
+    // ADLS_PANEL_PWM_INSTALL: preflight the native lifecycle and PWM enable site.
+    const char *light="__ZN31AppleIntelFramebufferController10LightUpEDPEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2";
+    const char *brightness="__ZN31AppleIntelFramebufferController14hwSetBacklightEj";
+    const uint8_t lightEntry[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50,0x49,0x89,0xcf};
+    const uint8_t brightnessEntry[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x48,0xff,0x05,0x90,0x44,0x09,0x00};
+    const uint8_t enable[]={0xbe,0x50,0x82,0x0c,0x00,0xba,0x00,0x00,0x00,0x80,0xff,0x90,0x30,0x01,0x00,0x00};
+    const auto lightFn=patcher.solveSymbol(index,light,address,size);
+    const auto brightnessFn=patcher.solveSymbol(index,brightness,address,size);
+    const bool known=size>=0x508c4 && lightFn==address+0x5063e && brightnessFn==address+0x4a56a &&
+     !memcmp(reinterpret_cast<void *>(lightFn),lightEntry,sizeof(lightEntry)) &&
+     !memcmp(reinterpret_cast<void *>(brightnessFn),brightnessEntry,sizeof(brightnessEntry)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x507e9),enable,sizeof(enable));
+    KernelPatcher::RouteRequest routes[] {{light,wrapADLSLightUpEDP,orgADLSLightUpEDP},
+     {brightness,wrapADLSPanelBacklight,orgADLSPanelBacklight}};
+    if(known && patcher.routeMultiple(index,routes,2,address,size)) {
+     uint8_t bridge[]={0x48,0xb8,0,0,0,0,0,0,0,0,0xff,0xd0,0x90,0x90,0x90,0x90};
+     const auto handler=reinterpret_cast<uintptr_t>(wrapADLSPanelPWMEnable);memcpy(bridge+2,&handler,sizeof(handler));
+     patcher.routeBlock(address+0x507e9,bridge,sizeof(bridge));
+     adlsPanelPWMReady=patcher.getError()==KernelPatcher::Error::NoError &&
+      !memcmp(reinterpret_cast<void *>(address+0x507e9),bridge,sizeof(bridge));
+    }
+    IORegistryEntry::getRegistryRoot()->setProperty("ADLSPanelPWMReady",adlsPanelPWMReady);
+    patcher.clearError();
+    // ADLS_PANEL_PWM_INSTALL_END
+   }
+
+			if (tglActive) {
+				// TGL/Xe-LP has no dedicated eDP transcoder. Keep the allocated
+				// pipe (or getTranscoderOffset's pipe argument), including when
+				// an eDP port is present. External DP/HDMI branches are unchanged.
+				// Linux v6.12: XE_D_DISPLAY and intel_ddi_compute_config().
+				// Preflight every site before modifying this exact donor image.
+				struct EDPTranscoderSite {
+					const char *symbol; uint32_t function, offset; uint8_t length, expected[6];
+				};
+				static const EDPTranscoderSite sites[] {
+					// SetupParams must also select a clock for eDP, using DDI+1.
+					{"__ZN31AppleIntelFramebufferController11SetupParamsEP21AppleIntelFramebufferP21AppleIntelDisplayPathP10CRTCParamsPK29IODetailedTimingInformationV2",0x4E758,0x4E7A3,2,{0x74,0x3F}},
+					{"__ZN31AppleIntelFramebufferController10enablePipeEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",0x48BB6,0x48E38,6,{0x41,0xBC,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController12setColorModeEP21AppleIntelFramebufferP21AppleIntelDisplayPathjjbPK29IODetailedTimingInformationV2",0x491F2,0x493C6,6,{0x41,0xBC,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController19getTranscoderOffsetEP14AppleIntelPortjj",0x49538,0x4956C,5,{0xB8,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController35hwCRTCToIODetailedTimingInformationEP21AppleIntelFramebufferP29IODetailedTimingInformationV2",0x49D46,0x49EAA,5,{0xBB,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController15hwWaitForVBlankEP21AppleIntelFramebufferj",0x4AE1E,0x4AF0E,5,{0xBE,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController28hwWaitForEndOfVerticalActiveEP21AppleIntelFramebufferj",0x4CBEC,0x4CCDE,5,{0xBE,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController14disableDisplayEP21AppleIntelFramebufferP21AppleIntelDisplayPathh",0x4D34C,0x4D705,5,{0xB9,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController12hwDisableVRREP21AppleIntelFramebufferb",0x4DD68,0x4DF95,5,{0xBB,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController12hwDisableVRREP21AppleIntelFramebufferb",0x4DD68,0x4E165,5,{0xBB,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController12hwDisableVRREP21AppleIntelFramebufferb",0x4DD68,0x4E2AF,5,{0xBB,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController12hwDisableVRREP21AppleIntelFramebufferb",0x4DD68,0x4E439,5,{0xBB,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController33isVSCSDPSetForRequiredColorimetryEP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",0x4F32E,0x4F3B0,5,{0xBE,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController11hwEnableVRREP21AppleIntelFramebufferPK29IODetailedTimingInformationV2",0x4F586,0x4F77F,6,{0x41,0xBC,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController13disableVSCDIPEP21AppleIntelFramebufferP21AppleIntelDisplayPath",0x5248C,0x5252B,5,{0xBB,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController18disableDRMDIPforDPEP21AppleIntelFramebufferP21AppleIntelDisplayPath",0x52576,0x52615,5,{0xBB,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController18disableAVIDIPforDPEP21AppleIntelFramebufferP21AppleIntelDisplayPath",0x5265E,0x526FD,5,{0xBB,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController12enableVSCDIPEP21AppleIntelFramebufferP21AppleIntelDisplayPathhhj",0x5298C,0x52A6D,5,{0xBB,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController25setVSCSDPForPixelEncodingEP21AppleIntelFramebufferP21AppleIntelDisplayPathhhj",0x576C8,0x5776D,5,{0xBE,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController17enableAVIDIPforDPEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",0x57984,0x57A42,6,{0x41,0xBF,0x0F,0x00,0x00,0x00}},
+					{"__ZN31AppleIntelFramebufferController17enableDRMDIPforDPEP21AppleIntelFramebufferP21AppleIntelDisplayPatht",0x57BDA,0x57CD8,6,{0x41,0xBD,0x0F,0x00,0x00,0x00}},
+				};
+				static const uint8_t noOverride[] {0x90,0x90,0x90,0x90,0x90,0x90};
+				static const uint8_t timingExpected[] {0x48,0x8B,0x0D,0x48,0x47,0x09,0x00,0x48,0x8D,0x41,0x01,0x48,0x89,0x05,0x3D,0x47,0x09,0x00};
+				static const uint8_t timingReplacement[] {0x85,0xC0,0x0F,0x84,0xD3,0xFE,0xFF,0xFF,0x48,0x8B,0x0D,0x40,0x47,0x09,0x00,0x90,0x90,0x90};
+				// N=0 means no usable DP timing. Reuse native zero-output and
+				// lock-release handling, rather than inventing a clock or divisor.
+				static const uint8_t zeroExit[] {0xBE,0xA0,0x00,0x00,0x00,0x4C,0x89,0xFF};
+				bool ready = size > 0x57CDE &&
+					!memcmp(reinterpret_cast<void *>(address+0x49EE9),timingExpected,sizeof(timingExpected)) &&
+					!memcmp(reinterpret_cast<void *>(address+0x49DC4),zeroExit,sizeof(zeroExit));
+				for (const auto &site : sites) {
+					if (!ready) break;
+					ready = patcher.solveSymbol(index,site.symbol,address,size)==address+site.function &&
+						!memcmp(reinterpret_cast<void *>(address+site.offset),site.expected,site.length);
+				}
+				if (ready) {
+					for (const auto &site : sites) {
+						patcher.routeBlock(address+site.offset,noOverride,site.length);
+						ready = patcher.getError()==KernelPatcher::Error::NoError &&
+							!memcmp(reinterpret_cast<void *>(address+site.offset),noOverride,site.length);
+						if (!ready) break;
+					}
+					if (ready) {
+						patcher.routeBlock(address+0x49EE9,timingReplacement,sizeof(timingReplacement));
+						ready = patcher.getError()==KernelPatcher::Error::NoError &&
+							!memcmp(reinterpret_cast<void *>(address+0x49EE9),timingReplacement,sizeof(timingReplacement));
+					}
+				}
+				tglEDPTranscoderReady = ready;
+				IORegistryEntry::getRegistryRoot()->setProperty("TGLEDPTranscoderReady",ready);
+				patcher.clearError();
+			}
 }
 
 // Retain hwSetPanelPowerConfig's caller-serialization contract. The wrapper

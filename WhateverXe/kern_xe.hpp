@@ -349,6 +349,7 @@ private:
 	mach_vm_address_t orgTGLPlaneSetup {}, orgTGLColorMode {}, orgTGLPixelInfo {};
 	mach_vm_address_t orgTGLModeTiming {};
 	bool tglPanelDepthReady {false};
+ void processNativePanel(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
  bool tglPanelTimingReady {};
  mach_vm_address_t orgTGLPanelTiming {},orgTGLPanelConfig {};
  uint32_t tglPanelTimingBIOS[3] {};
