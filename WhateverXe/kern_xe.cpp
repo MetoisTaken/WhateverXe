@@ -3894,12 +3894,16 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
     // All snapshots below are consumed synchronously; setProperty copies the
     // bytes. Reuse one allocation rather than reserve every branch's snapshot
     // (including return temporaries) in the DEBUG bootstrap stack frame.
-    auto snapshot=static_cast<AlderLakeN::DisplayReadout *>(IOMalloc(sizeof(AlderLakeN::DisplayReadout)));
+    struct BootstrapScratch {
+        AlderLakeN::DisplayReadout display;
+        Display13Boot::NormalizeScratch normalize;
+    };
+    auto snapshot=static_cast<BootstrapScratch *>(IOMalloc(sizeof(BootstrapScratch)));
     if(!snapshot) {
         pci->setProperty("WEXDisplay13BootstrapAllocationFailed",true);
         map->release();return;
     }
-    auto &result=*snapshot;
+    auto &result=snapshot->display;
 	struct ReadIO {
 		volatile uint8_t *base;
 		uint64_t length;
@@ -3946,7 +3950,7 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 
 	bool bootstrapReady=true;
 	if(displayRequested && linearTest && (result.activePipes&(result.activePipes-1))) {
-		auto parked=Display13Boot::normalize(io,result,barReady && Display13FBTopology::multiOutputWiring(board) && xelpMemoryMatches(pci),board,xelpMemory);
+		auto parked=Display13Boot::normalize(io,result,barReady && Display13FBTopology::multiOutputWiring(board) && xelpMemoryMatches(pci),board,xelpMemory,snapshot->normalize);
 		pci->setProperty("N97DualGOPNormalize",&parked,sizeof(parked));
 		AlderLakeN::readDisplay(io,barReady,result);
 		pci->setProperty("N97DualGOPAfter",&result,sizeof(result));
@@ -4508,6 +4512,9 @@ struct Display13FBPowerContext {
     bool engineEnabled {};
     volatile uintptr_t arbitrationWriterBase {}; // Qualified in sleepable engine context.
     IOLock *lock {};
+    // Borrow only while lock is held, and finish consuming the snapshot
+    // before releasing it or calling a native operation that can reenter.
+    AlderLakeN::DisplayReadout displayScratch;
     void *power {}, *controller {}, *access {};
     IOMemoryMap *map {}; // Owned mapping remains valid even on native start failure.
     uint32_t sequence {}, errors {}, writes {}, firstFaultLine {};
@@ -5106,7 +5113,7 @@ static Display13FBMemory::Readout display13FBInspectMemory(IOService *fb,bool bo
 	} io {c.map};
     const auto tc=Display13TC::Boot::capture(io,bootScanout && c.bridge.bootPort>=3,c.bridge.bootPort,0);
     const bool dp=bootScanout && c.bootDP;
-    const auto source=AlderLakeN::readDisplay(io,dp);
+    auto &source=c.displayScratch;AlderLakeN::readDisplay(io,dp,source);
 	return Display13FBMemory::inspect(io,controller,controller->getMetaClass()->getClassSize(),
 		fb,fb->getMetaClass()->getClassSize(),aperture->getLength(),xelpMemory,bootScanout,display13FBExpectedOwner(controller),c.bridge.bootPort,
         c.bridge.bootPort>=3 ? &tc : nullptr,dp?&source:nullptr,
@@ -6550,7 +6557,7 @@ uint32_t XE::wrapDisplay13TCMode(OSObject *port,uint32_t wanted) {
         Display13FBTopology::bootDDI(self->adlnOutputWiring,bootIO.read(0x60400),true)==ddi &&
         (bootIO.read(0x70008)&0xc0000000)==0xc0000000 && boot.unchanged(bootIO);
     if(inherited && dpBoot) {
-        const auto source=AlderLakeN::readDisplay(bootIO,true);
+        auto &source=c.displayScratch;AlderLakeN::readDisplay(bootIO,true,source);
         inherited=source.activePipes==1 && AlderLakeN::dpSourceUnchanged(bootIO,source,0,ddi,0,&boot);
     }
     const auto preparation=framebufferLinkRequirements(port,4).preparation(inherited);
@@ -8125,7 +8132,7 @@ void XE::wrapAlderLakeNSetupWorkLoop(IOService *controller,IOWorkLoop *workLoop)
                 const bool dp=ddi<7 && (callbackXE->adlnOutputWiring.links()&(1U<<ddi));
                 bool linked=!dp;
                 if(dp && display13SSTPort(port)) {
-                    Display13FBBootIO io{c.map};const auto boot=AlderLakeN::readDisplay(io,true);
+                    Display13FBBootIO io{c.map};auto &boot=c.displayScratch;AlderLakeN::readDisplay(io,true,boot);
                     if(ddi>=3) {
                         const auto source=Display13TC::Boot::capture(io,true,ddi,0);
                         Display13FBTCIO tc{port,ddi-3};
@@ -9972,7 +9979,7 @@ void XE::wrapAlderLakeNPowerInit(void *power,void *controller) {
                 Display13FBBootIO bootIO{map};boot=Display13TC::Boot::capture(bootIO,true,bootPort,0,dpBoot).valid();
             }
             if(boot && dpBoot) {
-                Display13FBBootIO bootIO{map};const auto source=AlderLakeN::readDisplay(bootIO,true);uint32_t aux=0;
+                Display13FBBootIO bootIO{map};auto &source=c.displayScratch;AlderLakeN::readDisplay(bootIO,true,source);uint32_t aux=0;
                 const auto tc=Display13TC::Boot::capture(bootIO,bootPort>=3,bootPort,0,true);
                 boot=AlderLakeN::dpSourceUnchanged(bootIO,source,0,bootPort,0,bootPort>=3?&tc:nullptr,(callbackXE->adlnOutputWiring.panel&(1U<<bootPort))!=0);
                 if(bootPort<2)boot=boot && AlderLakeN::value(source,Display13Power::AUX,aux) && (aux&(1U<<(2*bootPort)));
@@ -9983,7 +9990,7 @@ void XE::wrapAlderLakeNPowerInit(void *power,void *controller) {
             }
 			else {result.status=Display13Power::Status::InvalidDomains;adlnFault(c.bridge.state.faulted,__LINE__);}
             if(result.status==Display13Power::Status::Complete && dpBoot && bootPort<2) {
-                Display13FBBootIO bootIO{map};const auto source=AlderLakeN::readDisplay(bootIO,true);
+                Display13FBBootIO bootIO{map};auto &source=c.displayScratch;AlderLakeN::readDisplay(bootIO,true,source);
                 result=AlderLakeN::holdDPBootAUX(bootIO,source,c.bridge,c.mainLink[bootPort],bootPort,(callbackXE->adlnOutputWiring.panel&(1U<<bootPort))!=0);
                 if(result.status!=Display13Power::Status::Complete)adlnFault(c.bridge.state.faulted,__LINE__);
             }
@@ -10023,7 +10030,7 @@ void XE::wrapAlderLakeNPowerInit(void *power,void *controller) {
             adopted=wrapDisplay13TCMode(port,4)==kIOReturnSuccess;
             IOLockLock(c.lock);
             if(adopted) {
-                Display13FBBootIO io{c.map};const auto view=AlderLakeN::readDisplay(io,true);
+                Display13FBBootIO io{c.map};auto &view=c.displayScratch;AlderLakeN::readDisplay(io,true,view);
                 const auto tc=Display13TC::Boot::capture(io,true,tcBootDDI,0);
                 Display13FBTCIO access{port,tcBootDDI-3};
                 adopted=access.owned(tcBootDDI) && access.linkHeld() && view.activePipes==1 &&
@@ -14080,6 +14087,18 @@ void XE::wrapTGLHostSWInterrupt(void *streamer,void *source,int count) {
  tglHostIRQEnd(r);
 }
 
+// Terminal diagnostics can run on interrupt paths: no allocation, sleeping,
+// or waiting for another CPU. The first fatal report owns these bytes until
+// panic; a concurrent/reentrant report uses only the short fallback message.
+struct TGLFatalLogStorage {
+ volatile uint32_t claimed {};
+ struct {
+  struct {char trail[1800],vm[1800],loads[1000];} csb;
+  struct {char detail[1400],boundary[1400],preStart[640];} guc;
+ } bytes {};
+ bool claim() {return __sync_bool_compare_and_swap(&claimed,0,1);}
+};
+static TGLFatalLogStorage tglFatalLogStorage;
 static void tglHostCSBFatal(const char *reason,const uint32_t *entry,void *failedStreamer=nullptr);
 
 namespace {
@@ -14917,12 +14936,13 @@ void XE::wrapTGLHostCSB(void *streamer,uint32_t *entry,uint32_t *index) {
 // Both routes run only AFTER the native validator has rejected list state.
 // Preserve failure, enriching the persisted panic rather than suppressing it.
 static void tglHostCSBFatal(const char *reason,const uint32_t *entry,void *failedStreamer) {
+ if(!tglFatalLogStorage.claim())PANIC("igfx","concurrent CSB fatal: %s entry=%x:%x",reason,entry?entry[1]:0,entry?entry[0]:0);
  uint64_t before=0,writes=0,immediate=0,finalBad=0;
  for (uint32_t i=0;i<tglHost.maps && i<arrsize(tglHost.map);++i) {
   const auto &r=tglHost.map[i];if (!__atomic_load_n(&r.ready,__ATOMIC_ACQUIRE)) continue;
   before+=r.q[5];writes+=r.q[10];immediate+=r.q[11];finalBad+=r.q[12];
  }
- char trail[1800] {};size_t used=0;uint32_t kept=0;uint64_t streamer=reinterpret_cast<uintptr_t>(failedStreamer);
+ auto &trail=tglFatalLogStorage.bytes.csb.trail;size_t used=0;uint32_t kept=0;uint64_t streamer=reinterpret_cast<uintptr_t>(failedStreamer);
  // Locate this failure's streamer, then retain its history across interrupt
  // threads. Fixed records are read only here, after the native fatal decision.
  for (uint32_t i=tglHost.csbs<arrsize(tglHost.csb) ? tglHost.csbs : arrsize(tglHost.csb);i && kept<6;--i) {
@@ -14942,7 +14962,7 @@ static void tglHostCSBFatal(const char *reason,const uint32_t *entry,void *faile
  const bool submitted=__atomic_load_n(&submit.ready,__ATOMIC_ACQUIRE)!=0;
  // r105: persist r104's existing immutable samples on failure too. No new
  // healthy-path acquisition or MMIO access. Keep failed/absent walks explicit.
- char vm[1800] {};size_t vmUsed=0;
+ auto &vm=tglFatalLogStorage.bytes.csb.vm;size_t vmUsed=0;
  for (unsigned phase=0;phase<2;++phase) {
   const auto ready=__atomic_load_n(&tglVM.ready[phase],__ATOMIC_ACQUIRE);
   const auto v=tglVM.q[phase];
@@ -14954,7 +14974,7 @@ static void tglHostCSBFatal(const char *reason,const uint32_t *entry,void *faile
   if (count<0 || static_cast<size_t>(count)>=sizeof(vm)-vmUsed) break;
   vmUsed+=count;
  }
- char loads[1000] {};size_t loadUsed=0;unsigned keptLoads=0;
+ auto &loads=tglFatalLogStorage.bytes.csb.loads;size_t loadUsed=0;unsigned keptLoads=0;
  const TGLHostRecord *latestLoad=nullptr;
  for (uint32_t i=tglHost.loads<arrsize(tglHost.load) ? tglHost.loads : arrsize(tglHost.load);i && keptLoads<1;--i) {
   const auto &r=tglHost.load[i-1];if (!__atomic_load_n(&r.ready,__ATOMIC_ACQUIRE)) continue;
@@ -15526,8 +15546,9 @@ void XE::wrapTGLGuCHeaderPanic(void *guc) {
 		FunctionCast(wrapTGLGuCHeaderPanic, callbackXE->orgTGLGuCHeaderPanic)(guc);
 		return;
 	}
+	if(!tglFatalLogStorage.claim())PANIC("igfx","concurrent GuC CSS-header fatal");
 	auto base = *reinterpret_cast<volatile uint8_t **>(static_cast<uint8_t *>(o.accelerator) + 0x1240);
-	char detail[1400] {}; size_t used = 0;
+	auto &detail=tglFatalLogStorage.bytes.guc.detail; size_t used = 0;
 	for (uint32_t i=0; i<arrsize(o.dma) && used < sizeof(detail); ++i) {
 		const int n = snprintf(detail+used, sizeof(detail)-used, "%u:%llx ", i, o.dma[i]);
 		if (n < 0 || static_cast<size_t>(n) >= sizeof(detail)-used) break;
@@ -15535,13 +15556,13 @@ void XE::wrapTGLGuCHeaderPanic(void *guc) {
 	}
 	// Same native fatal CSS-header condition. Do not fake transfer success or
 	// continue into scheduler/firmware execution; persist the missing evidence.
-	char boundary[1400] {}; used=0;
+	auto &boundary=tglFatalLogStorage.bytes.guc.boundary; used=0;
 	for (uint32_t i=0;i<64 && used<sizeof(boundary);++i) {
 		const int n=snprintf(boundary+used,sizeof(boundary)-used,"%u:%llx ",i,o.boundary[i/32][i%32]);
 		if (n<0 || static_cast<size_t>(n)>=sizeof(boundary)-used) break;
 		used+=n;
 	}
-	char preStart[640] {}; used=0;
+	auto &preStart=tglFatalLogStorage.bytes.guc.preStart; used=0;
 	for (uint32_t i=0;i<arrsize(o.preStart) && used<sizeof(preStart);++i) {
 		const int n=snprintf(preStart+used,sizeof(preStart)-used,"%u:%llx ",i,o.preStart[i]);
 		if (n<0 || static_cast<size_t>(n)>=sizeof(preStart)-used) break;

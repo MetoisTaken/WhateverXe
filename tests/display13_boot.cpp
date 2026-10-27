@@ -5,6 +5,13 @@
 #include <vector>
 #include <cassert>
 #include <cstdio>
+// Independent scratch per call for the existing hardware-behavior cases.
+// Explicit reuse/alias checks below exercise the persistent caller storage.
+template<class IO> Display13Boot::Result normalize(IO &io,const AlderLakeN::DisplayReadout &boot,bool admitted,
+ const Display13HDMIWiring &w,const XELPMemory::Layout &memory) {
+ Display13Boot::NormalizeScratch scratch;
+ return Display13Boot::normalize(io,boot,admitted,w,memory,scratch);
+}
 struct IO {
     std::map<uint32_t,uint32_t> regs;
     std::vector<AlderLakeN::Register> writes;
@@ -173,7 +180,7 @@ static void tcComposition() {
     for(const auto &c:cases)for(bool owner:{false,true}) {
         IO io;const auto wiring=multiGOP(io,c.ports,c.count,c.dp,owner);
         const auto boot=AlderLakeN::readDisplay(io,true);const auto before=io.regs;
-        const auto r=Display13Boot::normalize(io,boot,true,wiring,memory);
+        const auto r=normalize(io,boot,true,wiring,memory);
         assert(r.status==Display13Boot::Status::Complete && r.after==1);
         for(auto reg:{0x45404U,0x45454U,0x45444U,0x60400U,0x60540U,0x46140U,0x70180U,0x7027cU})
             assert(io.regs[reg]==before.at(reg));
@@ -205,7 +212,7 @@ static void tcComposition() {
         if(failure==1)io.stuckPLL=true;
         if(failure==2)io.changeRegister=0x46048; // Retained TC3 PLL changes.
         if(failure==3)io.failWrite=Display13TC::Clock::Gate;
-        const auto r=Display13Boot::normalize(io,boot,true,wiring,memory);
+        const auto r=normalize(io,boot,true,wiring,memory);
         assert(r.status!=Display13Boot::Status::Complete && io.regs[0x7127c]);
         assert(io.regs[0x64300]&64); // Failure never returns the affected PHY.
         assert(io.regs[0x70180]&0x80000000U);
@@ -216,7 +223,7 @@ static void tcComposition() {
         if(bad==0)io.regs[0x64310]=0x80000000;
         if(bad==1)io.regs[0x161500]=1;
         if(bad==2)io.regs[0x46144]=0x40000000; // Combo selector on a TC port.
-        assert(Display13Boot::normalize(io,AlderLakeN::readDisplay(io,true),true,wiring,memory).status==Display13Boot::Status::Topology);
+        assert(normalize(io,AlderLakeN::readDisplay(io,true),true,wiring,memory).status==Display13Boot::Status::Topology);
         assert(io.writes.empty());
     }
     puts("PASS mixed Combo/TC GOP handoff into normal Mode/clock start, peer preservation and failure retention");
@@ -235,7 +242,7 @@ static void scaledBoot() {
         setup(io,0,scaler);setup(io,2,1-scaler);
         auto boot=AlderLakeN::readDisplay(io,true);
         assert(boot.status==AlderLakeN::ReadoutStatus::Complete && boot.count<=160);
-        auto n=Display13Boot::normalize(io,boot,true,w,memory);
+        auto n=normalize(io,boot,true,w,memory);
         assert(n.status==Display13Boot::Status::Complete && n.after==1);
         assert(io.regs[0x68180+scaler*0x100]==0x80000000);
         assert(!io.regs[0x69180+(1-scaler)*0x100]);
@@ -263,13 +270,13 @@ static void scaledBoot() {
         if(fault==8)io.regs[0x60000]=0x400004FF;
         if(fault==9)io.regs[0x60000]=0x0100077F;
         if(fault==10)io.regs[0x6000C]=0x046401FF;
-        auto n=Display13Boot::normalize(io,AlderLakeN::readDisplay(io,true),true,w,memory);
+        auto n=normalize(io,AlderLakeN::readDisplay(io,true),true,w,memory);
         if(n.status!=Display13Boot::Status::Topology || !io.writes.empty())fprintf(stderr,"fault=%u status=%u writes=%zu\n",fault,unsigned(n.status),io.writes.size());
         assert(n.status==Display13Boot::Status::Topology && io.writes.empty());
     }
     IO drift;auto w=multiGOP(drift,ports,3,1U<<5);setup(drift,0,0);
     drift.changeRegister=0x68174;
-    auto n=Display13Boot::normalize(drift,AlderLakeN::readDisplay(drift,true),true,w,memory);
+    auto n=normalize(drift,AlderLakeN::readDisplay(drift,true),true,w,memory);
     assert(n.status==Display13Boot::Status::PeerChanged && drift.writes.size()==2);
     puts("PASS scaled multi-GOP: binding, full destination, primary preservation, secondary detach and drift rejection");
 }
@@ -277,7 +284,7 @@ static void unusedTCBoot() {
     const unsigned ports[] {5,4};
     const auto setup=[&](IO &io) {
         auto w=multiGOP(io,ports,2,1U<<5);w.hdmi|=1U<<3;w.ddc[3]=9;
-        assert(Display13Boot::normalize(io,AlderLakeN::readDisplay(io,true),true,w,memory).status==Display13Boot::Status::Complete);
+        assert(normalize(io,AlderLakeN::readDisplay(io,true),true,w,memory).status==Display13Boot::Status::Complete);
         io.writes.clear();io.regs[0x64300]=0xC0;io.regs[0x161500]=0xC;
         io.regs[0x4610C]=io.regs[0x46038]=0;io.regs[Display13TC::Clock::Gate]|=1U<<12;
         io.regs[0x45444]|=3U<<6;
@@ -320,12 +327,24 @@ static void unusedTCBoot() {
     puts("PASS unused fixed TC firmware ownership: cold-only release, peers, live-resource refusal and readback");
 }
 int main() {
+    // Repeated normalizations must reset old witnesses and read a fresh final
+    // snapshot. Aliasing that storage with the live input must fail before IO.
+    Display13Boot::NormalizeScratch scratch;
+    for(unsigned trial=0;trial<3;++trial) {
+        IO fresh;auto boot=AlderLakeN::readDisplay(fresh,true);
+        const auto result=Display13Boot::normalize(fresh,boot,true,wiring,memory,scratch);
+        assert(result.status==Display13Boot::Status::Complete && result.writes==10);
+        assert(boot.activePipes==3 && scratch.after.activePipes==1);
+    }
+    IO alias;AlderLakeN::readDisplay(alias,true,scratch.after);
+    const auto rejected=Display13Boot::normalize(alias,scratch.after,true,wiring,memory,scratch);
+    assert(rejected.status==Display13Boot::Status::Unavailable && alias.writes.empty());
     unusedTCBoot();
     scaledBoot();
     prefixCertificates();
     tcComposition();
     IO io;const auto before=io.regs;
-    const auto r=Display13Boot::normalize(io,AlderLakeN::readDisplay(io,true),true,wiring,memory);
+    const auto r=normalize(io,AlderLakeN::readDisplay(io,true),true,wiring,memory);
     assert(r.status==Display13Boot::Status::Complete && r.after==1 && r.stage==7 && r.writes==10);
     assert(!io.regs[0x7127C] && !io.regs[0x7137C] && !io.regs[0x7117C]);
     for(auto w:io.writes)assert(w.offset==0x71180 || w.offset==0x7119C || w.offset==0x71008 ||
@@ -335,25 +354,25 @@ int main() {
         assert(io.regs[pair.first]==pair.second);
     assert(io.regs[0x46140]==0x10000000 && !io.regs[0x46144] && io.regs[0x61200]==0x1000);
     IO frames;frames.noFrames=true;
-    assert(Display13Boot::normalize(frames,AlderLakeN::readDisplay(frames,true),true,wiring,memory).status==Display13Boot::Status::Timeout);
+    assert(normalize(frames,AlderLakeN::readDisplay(frames,true),true,wiring,memory).status==Display13Boot::Status::Timeout);
     assert(frames.writes.size()==2 && frames.regs[0x7127C]);
     IO stop;stop.noStop=true;
-    assert(Display13Boot::normalize(stop,AlderLakeN::readDisplay(stop,true),true,wiring,memory).status==Display13Boot::Status::Timeout);
+    assert(normalize(stop,AlderLakeN::readDisplay(stop,true),true,wiring,memory).status==Display13Boot::Status::Timeout);
     assert(stop.writes.size()==3 && stop.regs[0x7127C]);
     IO idle;idle.noIdle=true;
-    assert(Display13Boot::normalize(idle,AlderLakeN::readDisplay(idle,true),true,wiring,memory).status==Display13Boot::Status::Timeout);
+    assert(normalize(idle,AlderLakeN::readDisplay(idle,true),true,wiring,memory).status==Display13Boot::Status::Timeout);
     assert(idle.writes.size()==6 && idle.regs[0x7127C]);
     IO peer;peer.changePeer=true;
-    assert(Display13Boot::normalize(peer,AlderLakeN::readDisplay(peer,true),true,wiring,memory).status==Display13Boot::Status::PeerChanged);
+    assert(normalize(peer,AlderLakeN::readDisplay(peer,true),true,wiring,memory).status==Display13Boot::Status::PeerChanged);
     assert(peer.writes.size()==2 && peer.regs[0x7127C]);
     for(auto reg:{0x71080U,0x71280U,Display13FBIRQ::DSBControl(1,0),0x60404U}) {
         IO foreign;foreign.regs[reg]=0x80000001;
-        assert(Display13Boot::normalize(foreign,AlderLakeN::readDisplay(foreign,true),true,wiring,memory).status==Display13Boot::Status::Topology);
+        assert(normalize(foreign,AlderLakeN::readDisplay(foreign,true),true,wiring,memory).status==Display13Boot::Status::Topology);
         assert(foreign.writes.empty());
     }
     IO port;port.regs[0x61400]=0x88030500;
-    assert(Display13Boot::normalize(port,AlderLakeN::readDisplay(port,true),true,wiring,memory).status==Display13Boot::Status::Topology && port.writes.empty());
-    IO denied;assert(Display13Boot::normalize(denied,AlderLakeN::readDisplay(denied,true),false,wiring,memory).status==Display13Boot::Status::Unavailable && denied.writes.empty());
+    assert(normalize(port,AlderLakeN::readDisplay(port,true),true,wiring,memory).status==Display13Boot::Status::Topology && port.writes.empty());
+    IO denied;assert(normalize(denied,AlderLakeN::readDisplay(denied,true),false,wiring,memory).status==Display13Boot::Status::Unavailable && denied.writes.empty());
     // Three firmware GOPs, all six physical-port/pipe permutations.
     for(unsigned a=0;a<3;++a)for(unsigned b=0;b<3;++b)for(unsigned c=0;c<3;++c) {
         if(a==b || a==c || b==c)continue;
@@ -365,7 +384,7 @@ int main() {
             t.regs[0x46140+4*p]=(ports[p]+1)<<28;
             t.regs[0x64000+0x100*ports[p]]=0x80000000;
         }
-        auto n=Display13Boot::normalize(t,AlderLakeN::readDisplay(t,true),true,wiring,memory);
+        auto n=normalize(t,AlderLakeN::readDisplay(t,true),true,wiring,memory);
         assert(n.status==Display13Boot::Status::Complete && n.before==7 && n.after==1 && n.writes==20);
         assert(t.regs[0x64000+0x100*a]&0x80000000);
         assert(!t.regs[0x7127C] && !t.regs[0x7227C] && t.regs[0x7027C]);
@@ -379,7 +398,7 @@ int main() {
             t.regs[0x60000+bank]=((width+280-1)<<16)|(width-1);
             t.regs[0x6000C+bank]=((height+45-1)<<16)|(height-1);
         }
-        assert(Display13Boot::normalize(t,AlderLakeN::readDisplay(t,true),true,wiring,memory).status==Display13Boot::Status::Complete);
+        assert(normalize(t,AlderLakeN::readDisplay(t,true),true,wiring,memory).status==Display13Boot::Status::Complete);
     }
     unsigned combinations=0;
     for(unsigned a=0;a<2;++a)for(unsigned parked:{1U,2U})for(unsigned dpMask=0;dpMask<4;++dpMask)
@@ -397,7 +416,7 @@ int main() {
         }
         const auto boot=AlderLakeN::readDisplay(t,true);const auto before=t.regs;
         assert(boot.version==2 && boot.count==157);
-        const auto result=Display13Boot::normalize(t,boot,true,mixed,memory);
+        const auto result=normalize(t,boot,true,mixed,memory);
         const bool parkDP=dpMask&(1U<<(1-a));
         assert(result.status==Display13Boot::Status::Complete && result.after==1 && result.writes==(parkDP?11U:10U));
         for(auto reg:{0x60400U,0x60540U,0x60030U,0x60034U,0x60040U,0x60044U,0x46140U,0x78000U,0x78004U})
@@ -424,23 +443,23 @@ int main() {
         auto reg=bad.offset+(bad.offset>=0x78000?p*0x200:p*0x1000);
         auto val=bad.value;if(bad.offset==0x60400)val+=p<<27;
         t.regs[reg]=val;
-        assert(Display13Boot::normalize(t,AlderLakeN::readDisplay(t,true),true,mixed,memory).status==Display13Boot::Status::Topology);
+        assert(normalize(t,AlderLakeN::readDisplay(t,true),true,mixed,memory).status==Display13Boot::Status::Topology);
         assert(t.writes.empty());
     }
     for(auto reg:{0x64000U,0x64100U,0x46140U,0x46144U}) {
         IO t;dp(t,0,0,4,true);dp(t,1,1,4,true);t.regs[reg]=0;
-        assert(Display13Boot::normalize(t,AlderLakeN::readDisplay(t,true),true,mixed,memory).status==Display13Boot::Status::Topology && t.writes.empty());
+        assert(normalize(t,AlderLakeN::readDisplay(t,true),true,mixed,memory).status==Display13Boot::Status::Topology && t.writes.empty());
     }
     // Snapshot freshness and peer preservation cover DP metadata as well.
     for(auto reg:{0x60540U,0x60030U,0x60034U,0x60040U,0x60044U,0x46140U,0x78004U}) {
         IO t;dp(t,0,0,4,true);dp(t,1,1,4,true);const auto boot=AlderLakeN::readDisplay(t,true);
         t.regs[reg]^=1;
-        assert(Display13Boot::normalize(t,boot,true,mixed,memory).status==Display13Boot::Status::Readback && t.writes.empty());
+        assert(normalize(t,boot,true,mixed,memory).status==Display13Boot::Status::Readback && t.writes.empty());
         t.regs[reg]^=1;t.changeRegister=reg;
-        assert(Display13Boot::normalize(t,boot,true,mixed,memory).status==Display13Boot::Status::PeerChanged && t.writes.size()==2);
+        assert(normalize(t,boot,true,mixed,memory).status==Display13Boot::Status::PeerChanged && t.writes.size()==2);
     }
     IO tp;dp(tp,0,0,4,true);dp(tp,1,1,4,true);tp.failWrite=0x61540;
-    auto failure=Display13Boot::normalize(tp,AlderLakeN::readDisplay(tp,true),true,mixed,memory);
+    auto failure=normalize(tp,AlderLakeN::readDisplay(tp,true),true,mixed,memory);
     assert(failure.status==Display13Boot::Status::Timeout && failure.stage==4 && tp.writes.size()==7 && tp.regs[0x7127C]);
     assert(Display13FBTopology::bootDDI(mixed,tp.regs[0x60400])==UINT32_MAX); // Runtime stays closed.
     printf("PASS GOP bootstrap: %u HDMI/DP combinations, STOP/transport/idle ordering, peer/M-N preservation and bounded failures\n",combinations);

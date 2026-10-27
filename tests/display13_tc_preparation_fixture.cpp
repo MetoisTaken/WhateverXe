@@ -30,6 +30,7 @@ struct MMIO {
  }
 };
 struct Context {
+ AlderLakeN::DisplayReadout displayScratch;
  Display13Power::NativeBridge bridge;Display13TC::Mode tcMode[4];
  bool tcSupported=true,tcBankFaulted=false,clockFaulted=false;unsigned tcBusy[4]{};OSObject*tcObject[4]{};
  void *lock=(void*)1,*controller=(void*)2,*access=(void*)3;MMIO*map=nullptr;
@@ -59,7 +60,15 @@ struct XE {
 alignas(8) uint8_t portBytes[0x700];
 template<class T>void put(unsigned o,T v){memcpy(portBytes+o,&v,sizeof(v));}
 unsigned nativeCalls=0;
-unsigned base(OSObject*p,unsigned mode){assert(!locked);++nativeCalls;memcpy(reinterpret_cast<uint8_t*>(p)+0x550,&mode,4);return 0;}
+unsigned base(OSObject*p,unsigned mode){
+ assert(!locked);++nativeCalls;
+ // Model native reentry borrowing the owner's scratch after Mode drops its
+ // lock. No reference to the old snapshot may be consumed after this call.
+ IOLockLock(display13FBPower.lock);
+ memset(&display13FBPower.displayScratch,0xa5,sizeof(display13FBPower.displayScratch));
+ IOLockUnlock(display13FBPower.lock);
+ memcpy(reinterpret_cast<uint8_t*>(p)+0x550,&mode,4);return 0;
+}
 int main(){
  unsigned cases=0;
  for(unsigned ddi=3;ddi<=6;++ddi)for(bool dp:{false,true})for(unsigned fault=0;fault<6;++fault){

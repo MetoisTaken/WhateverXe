@@ -104,16 +104,24 @@ template<class IO> UnusedTCResult releaseUnusedTC(IO &io,const AlderLakeN::Displ
     r.status=Status::Complete;return r;
 }
 
+// Caller-owned storage keeps snapshots and per-port witnesses off the nested
+// kernel bootstrap stack. The input remains live until the last peer check.
+struct NormalizeScratch {
+    AlderLakeN::DisplayReadout after;
+    Display13TC::Boot tc[3];
+};
 template<class IO> Result normalize(IO &io,const AlderLakeN::DisplayReadout &boot,bool admitted,
-                                    const Display13HDMIWiring &w,const XELPMemory::Layout &memory) {
+                                    const Display13HDMIWiring &w,const XELPMemory::Layout &memory,
+                                    NormalizeScratch &scratch) {
     Result r;r.before=boot.activePipes;
-    if(!admitted)return r;
+    if(!admitted || &boot==&scratch.after)return r;
     r.status=Status::Topology;
     const auto active=boot.activePipes;
     if(w.panel || !memory.valid || !Display13FBTopology::multiOutputWiring(w) || boot.status!=AlderLakeN::ReadoutStatus::Complete ||
        !(active&1) || active==1 || (active&~7U) || (active&~boot.poweredPipes))return r;
     uint32_t ports[3] {},clocks[3] {},transport[3] {},used=0,dpPipes=0;
-    Display13TC::Boot tc[3];
+    auto &tc=scratch.tc;
+    for(auto &port:tc)port={};
     uint32_t power=0,ddiPower=0,auxPower=0,gate=0;
     if(!AlderLakeN::value(boot,0x45404,power) || !AlderLakeN::value(boot,0x45454,ddiPower) ||
        !AlderLakeN::value(boot,0x45444,auxPower) ||
@@ -306,7 +314,7 @@ template<class IO> Result normalize(IO &io,const AlderLakeN::DisplayReadout &boo
         parked|=1U<<p;
     }
     current=UINT32_MAX;
-    const auto after=AlderLakeN::readDisplay(io,true);r.after=after.activePipes;
+    auto &after=scratch.after;AlderLakeN::readDisplay(io,true,after);r.after=after.activePipes;
     if(after.status!=AlderLakeN::ReadoutStatus::Complete || after.activePipes!=1 || !peer()) {r.status=Status::PeerChanged;return r;}
     r.stage=7;r.status=Status::Complete;return r;
 }

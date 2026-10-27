@@ -3,7 +3,7 @@
 import argparse,hashlib,json,plistlib,subprocess
 from pathlib import Path
 from check_compat_version import check as check_compat_version
-from check_boot_stack import check as check_boot_stack
+from check_boot_stack import check_objects as check_boot_stack
 ROOT=Path(__file__).resolve().parents[1]
 def run(cmd): subprocess.run([str(x) for x in cmd],check=True,cwd=ROOT)
 def main():
@@ -30,9 +30,10 @@ def main():
     cmd=[x for x in cmd if x not in ['-mkernel','-mmacosx-version-min=10.15']]
     cmd+=['-mmacosx-version-min=10.6','-DAPPLE_KEXT_ASSERTIONS=1','-DDRIVER_PRIVATE','-DAPPLE','-DNeXT','-fno-common','-fasm-blocks','-mmmx','-msse','-msse2','-msse3','-mssse3','-mfpmath=sse','-ftree-vectorize','-fno-non-call-exceptions']
    if not a.release:cmd+=['-DDEBUG=1']
+   obj.with_suffix('.su').unlink(missing_ok=True)
    run(cmd+['-c',source,'-o',obj]);objects.append(obj)
   if name=='WhateverXe':
-   (out/'boot-stack.json').write_text(json.dumps(check_boot_stack(objdir/'kern_xe.su'),indent=2)+'\n')
+   (out/'boot-stack.json').write_text(json.dumps(check_boot_stack(objects),indent=2)+'\n')
   exe=bundle/'MacOS'/name
   run(['xcrun','ld','-arch','x86_64','-kext','-undefined','dynamic_lookup','-no_fixup_chains','-macos_version_min',('10.6' if name=='WhateverXe' else '10.15'),'-o',exe,*objects,sdk/'Library/x86_64/libkmod.a'])
   libs={x:'10.0.0' for x in ['com.apple.kpi.bsd','com.apple.kpi.dsep','com.apple.kpi.iokit','com.apple.kpi.libkern','com.apple.kpi.mach','com.apple.kpi.unsupported']};libs['com.apple.iokit.IOPCIFamily']='1.1'
