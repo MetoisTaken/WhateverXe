@@ -23,7 +23,7 @@ template<class IO> bool reservedPrefix(IO &io,const AlderLakeN::DisplayReadout &
     const auto stable=[&] {
         return AlderLakeN::bootGeometryUnchanged(io,display,plan.pipe) &&
             (ddi<3 || (tc && tc->unchanged(io))) &&
-            (protocol!=AlderLakeN::GOPProtocol::DP || AlderLakeN::dpSourceUnchanged(io,display,plan.pipe,ddi,0,tc));
+            (protocol==AlderLakeN::GOPProtocol::TMDS || AlderLakeN::dpSourceUnchanged(io,display,plan.pipe,ddi,0,tc,protocol==AlderLakeN::GOPProtocol::EDP));
     };
     if(!stable())return false;
     for(unsigned i=0;i<memory.bytes/4096;++i)
@@ -110,7 +110,7 @@ template<class IO> Result normalize(IO &io,const AlderLakeN::DisplayReadout &boo
     if(!admitted)return r;
     r.status=Status::Topology;
     const auto active=boot.activePipes;
-    if(!memory.valid || !Display13FBTopology::multiOutputWiring(w) || boot.status!=AlderLakeN::ReadoutStatus::Complete ||
+    if(w.panel || !memory.valid || !Display13FBTopology::multiOutputWiring(w) || boot.status!=AlderLakeN::ReadoutStatus::Complete ||
        !(active&1) || active==1 || (active&~7U) || (active&~boot.poweredPipes))return r;
     uint32_t ports[3] {},clocks[3] {},transport[3] {},used=0,dpPipes=0;
     Display13TC::Boot tc[3];

@@ -329,7 +329,7 @@ template<class IO> Readout inspect(IO &io,const void *controller,size_t controll
                                   const void *framebuffer,size_t framebufferBytes,
                                   uint64_t apertureBytes,const XELPMemory::Layout &memory,bool bootScanout=true,uintptr_t expectedOwner=0,
                                   unsigned expectedDDI=1,const Display13TC::Boot *tc=nullptr,
-                                  const AlderLakeN::DisplayReadout *dp=nullptr) {
+                                  const AlderLakeN::DisplayReadout *dp=nullptr,bool panel=false) {
     Readout r;
     if (!associations(controller,controllerBytes,framebuffer,framebufferBytes,expectedOwner)) {
         r.status=Status::Association;return r;
@@ -340,7 +340,7 @@ template<class IO> Readout inspect(IO &io,const void *controller,size_t controll
         r.status=Status::DisplayState;return r;
     }
     if(bootScanout && dp && (dp->activePipes!=1 ||
-       !AlderLakeN::dpSourceUnchanged(io,*dp,0,expectedDDI,0,tc))) {
+       !AlderLakeN::dpSourceUnchanged(io,*dp,0,expectedDDI,0,tc,panel))) {
         r.status=Status::DisplayState;return r;
     }
     r.pool=pool(controller);const auto &p=r.pool;
@@ -401,7 +401,7 @@ template<class IO> Readout inspect(IO &io,const void *controller,size_t controll
         io.read(0x7019C)!=r.surface || io.read(0x701AC)!=r.surface ||
         io.read(0x70180)!=r.control || io.read(0x70188)!=r.stride || io.read(0x70190)!=r.size ||
         (expectedDDI>=3 && !tc->unchanged(io)) ||
-        (dp && !AlderLakeN::dpSourceUnchanged(io,*dp,0,expectedDDI,0,tc))))) {
+        (dp && !AlderLakeN::dpSourceUnchanged(io,*dp,0,expectedDDI,0,tc,panel))))) {
         r.status=Status::StateChanged;return r;
     }
     r.status=Status::Complete;return r;

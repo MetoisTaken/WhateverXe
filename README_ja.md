@@ -49,10 +49,13 @@ OS別の検証範囲と残る問題は[動作確認済みの機能と既知の�
 CPUモデル名や機種固有の設定は不要ですが、実機での動作確認は残っています。
 受付IDの一覧と対応する資源構成は[デバイス選択](docs/device-selection.md)を参照してください。
 
+実験的に、Alder Lake-N / Twin LakeとAlder Lake-H/P/U / Raptor Lake-H/P/Uの内蔵eDPを実装しています。対象はfirmwareで一意に記述されたCombo A/Bの単一パネルとPPS0・PCH PWMによる輝度制御です。CPU試験とdonor再生試験のみで、実機未検証です。同じソースrevisionからビルドしたWhateverXeとAppleIntelTGLCompatを組み合わせてください。条件は[表示の制限](docs/device-selection.md#display-limits)を参照してください。
+
 ### 対応に追加改修が必要
 
-- Alder Lake-N / Twin LakeとAlder Lake-H/P/U / Raptor Lake-H/P/Uの内蔵eDPパネル・
-  Combo PHY経由のDisplayPort・Type-C管理下の出力には追加改修が必要です。
+- Alder Lake-N / Twin LakeとAlder Lake-H/P/U / Raptor Lake-H/P/Uの
+  Combo PHY経由の外部DisplayPort・Type-C管理下の出力には追加改修が必要です。
+  その他の電源・輝度制御方式を使うeDPパネルも追加対応が必要です。
   GPUのIDを受け付けるだけで、これらの出力が有効になるわけではありません。
 - Rocket Lake-S：Tiger Lakeとは表示の電源・クロック制御が異なります。
   このリリースでは未対応で、実機検証の予定もありません。
@@ -196,3 +199,5 @@ WhateverXeとAppleIntelTGLCompatのkext、およびソースのmanifestは`build
 WhateverXeはWhateverGreenの著作権表示とBSD-3-Clauseライセンスを継承しています。[LICENSE.txt](LICENSE.txt)を参照してください。LiluとMacKernelSDKは別の依存コンポーネントです。
 
 Xeグラフィックスの取り組みを公開している[JulioNectar/XPS13Plus](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe)に感謝します。同リポジトリのcompiler adapterとLLVM bridgeを、WhateverXe GraphicsのOS標準AIR変換の参考にしました。
+
+内蔵パネルの対応では、[WhateverXe-RaptorLakeP](https://github.com/samranahmad09/WhateverXe-RaptorLakeP)、[X1Carbon-G11](https://github.com/dssoftx/Hackintosh-X1Carbon-G11-IrisXe-Tahoe)、XPS13Plus、[Linux i915の表示ソース](https://github.com/torvalds/linux/tree/v6.12/drivers/gpu/drm/i915/display)も、ハードウェアの挙動と実装の比較に参照しています。

@@ -23,7 +23,7 @@ inline bool supportedWiring(const Display13OutputWiring &w,bool fixedTC=false) {
 // A TC route uses the same validated handoff regardless of the GT family.
 // Keep the established Combo-only ADL-N startup ordering unchanged.
 inline bool deferredBootPrepare(const Display13OutputWiring &w,bool mobile) {
-    return mobile || (w.selected()&0x78);
+    return w.panel || mobile || (w.selected()&0x78);
 }
 inline bool multiOutputWiring(const Display13OutputWiring &w) {
     return selectedWiring(w) && (w.selected()&(w.selected()-1));
@@ -47,7 +47,7 @@ inline uint32_t bootDDI(const Display13OutputWiring &w,uint32_t trans,bool dpSou
     const auto mode=(trans>>24)&7;
     // Selection is not an adoption certificate. The DP caller must also prove
     // source state, physical TC ownership/power, memory and native handoff.
-    if(dpSource && mode==2 && (port<2 || port>=3) && (w.dp&(1U<<port)))return port;
+    if(dpSource && mode==2 && (port<2 || port>=3) && (w.links()&(1U<<port)))return port;
     if(mode>1)return UINT32_MAX;
     return (w.hdmi&(1U<<port)) ? port : UINT32_MAX;
 }

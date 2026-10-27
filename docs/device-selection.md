@@ -42,6 +42,18 @@ non-Intel physical devices are rejected. An invalid override does not silently
 fall back to the physical ID. Remove an obsolete ICL or other unsupported spoof
 to use automatic selection. A restart is required after changing the selection.
 
+- ADL-P/N internal panels: experimental standard eDP on Combo A/B, one panel
+  identified by VBT, PPS0 and PCH PWM0. Native modesetting uses the actual lane
+  count, link rate, EDID depth and negotiated framing; brightness preserves the
+  firmware PWM period/polarity. The firmware must already provide a single
+  linear 8-bpc RGB GOP on pipe A. Multiple active firmware displays with an
+  internal panel are rejected before bootstrap changes. This does not limit
+  subsequent native pipe allocation to pipe A. Use matching source builds of
+  WhateverXe and AppleIntelTGLCompat; older providers do not enable this path.
+  PPS1, EC/WMI or AUX brightness, DSC/FEC, PSR and startup without a GOP are
+  outside this implementation. No ADL-P/N eDP hardware result is claimed,
+  including physical brightness, full link retraining or system sleep/wake.
+
 The Display12 small-GT backends (TGL GT1, ADL-S/HX and RPL-S/HX) require
 their physical ID without an override. Topology comes from the Gen12 slice,
 DSS and EU-pair fuses; the supported four-bank capacity is checked separately.
@@ -78,7 +90,7 @@ must match the implemented path; ambiguous or cross-routed AUX layouts are exclu
 - ADL-S/HX and RPL-S/HX: Combo PHY A–C are implemented; PHY D/E and Type-C/TBT-managed
   routes are not. A USB-C socket wired as fixed DP is different from a Type-C-managed
   path. Firmware-derived DDI A eDP is implemented but not hardware-tested.
-- TGL and ADL-S panel handling supports the qualified PPS0/PWM0 path. Other PPS
+- TGL, ADL-S and experimental ADL-P/N panel handling supports the qualified PPS0/PWM0 path. Other PPS
   controllers and AUX-controlled backlights need additional work. Panel timing
   comes from VBT, firmware state and explicit properties. High-rate link selection
   has CPU coverage; not every panel or link rate has been tested on hardware.
@@ -89,7 +101,7 @@ must match the implemented path; ambiguous or cross-routed AUX layouts are exclu
   AUX wiring. Boot handoff supports validated linear RGB scanout, including
   supported firmware scaling, and retires secondary fixed TC firmware outputs
   before native startup. ADL-H has been tested with three outputs and a
-  DP-to-HDMI adapter. Direct DP sinks remain unverified. Combo DP, eDP, MST,
+  DP-to-HDMI adapter. Direct DP sinks remain unverified. External Combo DP, MST,
   Type-C-managed output and cross-routed AUX still need further implementation.
 
 The Display12 small-GT implementation accepts one slice, up to two DSS,

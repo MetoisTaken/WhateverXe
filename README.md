@@ -52,6 +52,7 @@ for OS coverage and remaining problems.
 - Tiger Lake-H45 (GT1): `9A60`, `9A68`, `9A70`.
 - Other supported Alder Lake-N configurations and Twin Lake.
 - Other Alder Lake-H/P/U and Raptor Lake-H/P/U configurations with supported fixed HDMI or fixed TC DisplayPort wiring.
+- Experimental internal eDP on Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U: a single firmware-described Combo A/B panel with PPS0 and PCH PWM brightness. This path has local CPU and donor replay coverage only; use WhateverXe and AppleIntelTGLCompat built from the same source revision. See [display limits](docs/device-selection.md#display-limits).
 - Other supported Alder Lake-S configurations, Alder Lake-HX, Raptor Lake-S and Raptor Lake-HX.
 
 These devices use implemented support shared with the tested families. Their
@@ -62,8 +63,8 @@ limits are listed in [device selection](docs/device-selection.md).
 ### Further implementation required
 
 - On Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U,
-  internal eDP panels, Combo-PHY DisplayPort and Type-C-managed output need
-  further implementation. Accepting the GPU ID does not enable these outputs.
+  external Combo-PHY DisplayPort and Type-C-managed output need
+  further implementation. eDP panels using other power/backlight methods also need additional support. Accepting the GPU ID does not enable these outputs.
 - Rocket Lake-S: its display power and clock handling differ from Tiger Lake.
   It is not supported by this release, and no hardware validation is scheduled.
 
@@ -266,3 +267,5 @@ WhateverXe retains WhateverGreen's copyright notices and BSD-3-Clause license.
 See [LICENSE.txt](LICENSE.txt). Lilu and MacKernelSDK are separate dependencies.
 
 Thanks to [JulioNectar/XPS13Plus](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe) for sharing its Xe graphics work. Its compiler adapter and LLVM bridge informed the OS-native AIR conversion used in WhateverXe Graphics.
+
+Internal-panel work also draws on [WhateverXe-RaptorLakeP](https://github.com/samranahmad09/WhateverXe-RaptorLakeP), [X1Carbon-G11](https://github.com/dssoftx/Hackintosh-X1Carbon-G11-IrisXe-Tahoe), XPS13Plus and the [Linux i915 display sources](https://github.com/torvalds/linux/tree/v6.12/drivers/gpu/drm/i915/display) for hardware behavior and implementation comparisons.
