@@ -35,6 +35,11 @@ when their work informed a change.
 ## Build and test
 
 Build with `python3 tools/build.py`; run CPU tests with `python3 tools/test.py`.
+The builder checks each generated Compat plist, including both DEBUG and RELEASE
+in CI. Existing output can be checked with `python3 tools/check_compat_version.py`
+and its build directory. Compat's release version and oldest compatible ABI are independent;
+do not raise the compatibility floor during an ordinary version bump. An ABI
+break requires coordinated Graphics client updates and final-pkg validation.
 Lilu.kext and MacKernelSDK are local ignored dependencies. Optional native replay
 requires the exact Apple drivers accepted by the tests. Do not commit generated
 payloads, Apple driver files, credentials or local machine state.

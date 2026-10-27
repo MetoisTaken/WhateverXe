@@ -1,6 +1,7 @@
 #ifndef KERN_DISPLAY13_FIRMWARE_HPP
 #define KERN_DISPLAY13_FIRMWARE_HPP
 #include "kern_vbt.hpp"
+#include "kern_xelp_panel_power.hpp"
 #include "kern_display13_output_wiring.hpp"
 namespace XELP { namespace VBT {
     // ADLP/ADLN VBT DDC1/2 => Combo pins1/2, DDC3..6 => TC pins9..12.
@@ -21,9 +22,11 @@ namespace XELP { namespace VBT {
     }
     // Display13 VBT AUX F..I maps directly to TC1..4. Capabilities do not
     // select live DP-alt: only the provider's legacy HPD/mode proof admits it.
-    inline Display13OutputWiring display13Fixed(const Ports &ports,uint32_t backend) {
+    inline Display13OutputWiring display13Fixed(const Ports &ports,uint32_t backend,Family family=Family::AlderLakeN) {
         auto w=display13HDMI(ports,backend);
         if(!w.valid || !ports.valid())return w;
+        if(PanelPower::nativePPS0(ports,family) && (backend&(1U<<ports.panel.ddi)))
+            w.panel=1U<<ports.panel.ddi;
         for(unsigned d=3;d<7;++d) {
             const auto &p=ports.port[d];const auto aux=(d+3)*0x10U;
             if(!(ports.present&backend&(1U<<d)) || (p.type&0x14)!=0x14 ||

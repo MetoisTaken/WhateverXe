@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.1
+
+Use the latest [WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics/releases) package.
+
+### Added
+
+- Add experimental internal display (eDP) and brightness support for Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U GPUs. Not yet tested on hardware.
+
+### Fixed
+
+- Fix DEBUG boot freezes and restart loops caused by excessive kernel stack usage.
+
 ## 0.6.0
 
 Use the latest [WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics/releases) package.

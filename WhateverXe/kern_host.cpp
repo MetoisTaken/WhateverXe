@@ -35,7 +35,8 @@ void XeHost::processKernel(KernelPatcher &patcher) {
  // hooks even when the selected profile deliberately has no Render backend.
  active=profile.displayAdmitted();
  const auto display=XELP::displayAdapter(profile.family);
- backlightEnabled=active && (display==XELP::DisplayAdapter::TGL || display==XELP::DisplayAdapter::ADLS) &&
+ backlightEnabled=active && (display==XELP::DisplayAdapter::TGL || display==XELP::DisplayAdapter::ADLS ||
+  display==XELP::DisplayAdapter::ADLP || display==XELP::DisplayAdapter::ADLN) &&
   info->firmwareVendor!=DeviceInfo::FirmwareVendor::Apple;
  backlightGPU=backlightEnabled ? gpu : nullptr;
  if(published) {
