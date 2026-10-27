@@ -3891,6 +3891,15 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 	auto map = pci->mapDeviceMemoryWithRegister(0x10,
 		(linearTest || gtTest ? 0 : kIOMapReadOnly) | kIOMapInhibitCache);
 	if (!map) return;
+    // All snapshots below are consumed synchronously; setProperty copies the
+    // bytes. Reuse one allocation rather than reserve every branch's snapshot
+    // (including return temporaries) in the DEBUG bootstrap stack frame.
+    auto snapshot=static_cast<AlderLakeN::DisplayReadout *>(IOMalloc(sizeof(AlderLakeN::DisplayReadout)));
+    if(!snapshot) {
+        pci->setProperty("WEXDisplay13BootstrapAllocationFailed",true);
+        map->release();return;
+    }
+    auto &result=*snapshot;
 	struct ReadIO {
 		volatile uint8_t *base;
 		uint64_t length;
@@ -3919,7 +3928,7 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
     const bool reservationReady=XELPMemory::reservation(xelpMemory,reserved);
     uint64_t reservation[] {1,reservationReady,reserved,xelpMemory.usable()};
     pci->setProperty("N97StolenReservation",reservation,sizeof(reservation));
-	auto result = AlderLakeN::readDisplay(io, barReady);
+	AlderLakeN::readDisplay(io,barReady,result);
 	pci->setProperty("N97Display13Boot", &result, sizeof(result));
     // Bounded pre-native evidence for selected fixed TC ports, including ports
     // which firmware owns without routing a transcoder to them.
@@ -3939,7 +3948,7 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 	if(displayRequested && linearTest && (result.activePipes&(result.activePipes-1))) {
 		auto parked=Display13Boot::normalize(io,result,barReady && Display13FBTopology::multiOutputWiring(board) && xelpMemoryMatches(pci),board,xelpMemory);
 		pci->setProperty("N97DualGOPNormalize",&parked,sizeof(parked));
-		result=AlderLakeN::readDisplay(io,barReady);
+		AlderLakeN::readDisplay(io,barReady,result);
 		pci->setProperty("N97DualGOPAfter",&result,sizeof(result));
 		bootstrapReady=parked.status==Display13Boot::Status::Complete;
 	}
@@ -3965,8 +3974,8 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 		auto linear=AlderLakeN::reinitializeLinear(io,result,barReady && xelpMemoryMatches(pci),bootDDI,
             AlderLakeN::GOPProtocol::TMDS,bootDDI>=3 ? &tc : nullptr);
 		pci->setProperty("N97Display13Linear",&linear,sizeof(linear));
-		auto after=AlderLakeN::readDisplay(io,barReady);
-		pci->setProperty("N97Display13After",&after,sizeof(after));
+		AlderLakeN::readDisplay(io,barReady,result);
+		pci->setProperty("N97Display13After",&result,sizeof(result));
 		SYSLOG("igfx", "AlderLakeN Display13 linear status=%u pipe=%u writes=%u frames=%u..%u restored=%u",
 			static_cast<uint32_t>(linear.status),linear.pipe,linear.writes,linear.framesBefore,linear.framesAfter,linear.restored);
 		if (checkKernelArgument("-wex-adln-scanout")) {
@@ -4006,7 +4015,7 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 				if (!predecessor) break;
 				bzero(addresses,addressBytes);
 				bzero(predecessor,addressBytes);
-				auto lease=AlderLakeN::leaseGOPGGTT(io,after,predecessor,barReady && xelpMemoryMatches(pci),xelpMemory);
+				auto lease=AlderLakeN::leaseGOPGGTT(io,result,predecessor,barReady && xelpMemoryMatches(pci),xelpMemory);
 				pci->setProperty("N97GGTTLease",&lease,sizeof(lease));
 				if (lease.status!=1) {scan.status=uint64_t(AlderLakeN::ScanoutStatus::BusyGGTT);break;}
 				for (unsigned b=0;b<2;++b) {
@@ -4040,8 +4049,8 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 				}
 				if (scan.buffers!=2) break;
 				allocation[0]=8;
-				auto state=AlderLakeN::readDisplay(io,barReady);
-				scan=AlderLakeN::testScanout(io,state,addresses,true,predecessor);
+				AlderLakeN::readDisplay(io,barReady,result);
+				scan=AlderLakeN::testScanout(io,result,addresses,true,predecessor);
 				scan.buffers=2;
 			} while(false);
 			scan.pciCommand=command;scan.descriptorOptions=descriptorOptions;
@@ -4079,7 +4088,7 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 			gt.resources.eus,gt.resources.l3Banks);
 	}
     if(displayRequested) {
-        auto display=AlderLakeN::readDisplay(io,barReady);
+        AlderLakeN::readDisplay(io,barReady,result);
         auto optionProperty=pci->getProperty("IOMemoryDescriptorOptions");
         auto opts=OSDynamicCast(OSNumber,optionProperty);
         const uint64_t mapperOptions=opts ? opts->unsigned64BitValue() : 0;
@@ -4095,9 +4104,9 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
         if(bootDDI>=3 && bootDDI<7)pci->setProperty("WEXDisplay13TCBoot",&tc,sizeof(tc));
         AlderLakeN::LinearPlan bootPlan;
         uint32_t sourceProof[]={1,bootDDI,uint32_t(protocol),uint32_t(AlderLakeN::linearPlan(
-            display,bootPlan,bootDDI,protocol,bootDDI>=3?&tc:nullptr)),tc.valid()};
+            result,bootPlan,bootDDI,protocol,bootDDI>=3?&tc:nullptr)),tc.valid()};
         pci->setProperty("N97NativeBootSource",sourceProof,sizeof(sourceProof));
-        const bool prefix=Display13Boot::reservedPrefix(io,display,bootstrapReady,bootDDI,xelpMemory,
+        const bool prefix=Display13Boot::reservedPrefix(io,result,bootstrapReady,bootDDI,xelpMemory,
             bootDDI>=3 ? &tc : nullptr,protocol);
         auto aperture=pci->getDeviceMemoryWithRegister(0x18);
         const bool memoryReady=
@@ -4132,8 +4141,8 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 			if (!aperture || aperture->getLength()!=0x10000000) break;
 			predecessor=static_cast<uint64_t *>(IOMalloc(bytes));
 			if (!predecessor) break;
-			auto state=AlderLakeN::readDisplay(io,true);
-			auto lease=AlderLakeN::leaseGOPGGTT(io,state,predecessor,true,xelpMemory);
+			AlderLakeN::readDisplay(io,true,result);
+			auto lease=AlderLakeN::leaseGOPGGTT(io,result,predecessor,true,xelpMemory);
 			pci->setProperty("N97GPULease",&lease,sizeof(lease));
 			if (lease.status!=1) {gpu.status=uint64_t(AlderLakeN::GPUStatus::BusyGGTT);break;}
 			buffer=IOBufferMemoryDescriptor::withOptions(kIODirectionInOut|kIOMemoryMapperNone,AlderLakeN::GPUBytes,4096);
@@ -4160,6 +4169,7 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 			gpu.status,gpu.stage,gpu.engineWrites,gpu.head,gpu.tail,gpu.result,gpu.token,gpu.retained);
 	}
 
+    IOFree(snapshot,sizeof(*snapshot));
 	map->release();
 }
 
@@ -4256,8 +4266,12 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
             };
             for(auto &reg:registers)reg[1]=io.read(reg[0]);
             physicalGPU->setProperty("ADLPDisplayBoot",registers,sizeof(registers));
-            auto display=AlderLakeN::readDisplay(io,true);
-            physicalGPU->setProperty("ADLPScanoutBoot",&display,sizeof(display));
+            auto display=static_cast<AlderLakeN::DisplayReadout *>(IOMalloc(sizeof(AlderLakeN::DisplayReadout)));
+            if(display) {
+                AlderLakeN::readDisplay(io,true,*display);
+                physicalGPU->setProperty("ADLPScanoutBoot",display,sizeof(*display));
+                IOFree(display,sizeof(*display));
+            } else physicalGPU->setProperty("ADLPReadoutAllocationFailed",true);
             SYSLOG("igfx","ADL-P readout status=%u fuses=%x/%x/%x/%x/%x release=%x/%x; donor blocked",
                 static_cast<unsigned>(gt.status),gt.fuses[0],gt.fuses[1],gt.fuses[2],gt.fuses[3],gt.fuses[4],
                 gt.releasedMask,gt.releaseFailedMask);

@@ -131,9 +131,14 @@ struct DisplayReadout {
 
 // Read only. Check Display 13 PW_A/B/C before pipe-local registers; do not
 // access TGL FIA/TC/Dekel addresses or issue selector/power/MMIO writes.
-template<class IO> DisplayReadout readDisplay(IO &io, bool admitted) {
-    DisplayReadout r;
-    if (!admitted) return r;
+template<class IO> void readDisplay(IO &io, bool admitted, DisplayReadout &r) {
+    // Reused storage must not retain pipe bits or registers from an earlier
+    // snapshot. Reset fields in place: aggregate assignment can itself reserve
+    // a full DisplayReadout temporary on the unoptimized kernel stack.
+    r.version=2;r.status=ReadoutStatus::NotAdmitted;
+    r.count=r.poweredPipes=r.activePipes=r.hdmiBPipes=0;
+    for(auto &reg:r.registers) {reg.offset=0;reg.value=0;}
+    if (!admitted) return;
     const auto add = [&](uint32_t offset) {
         if (r.count >= sizeof(r.registers) / sizeof(r.registers[0]) || !io.readable(offset)) {
             r.status = ReadoutStatus::Unavailable;
@@ -146,7 +151,7 @@ template<class IO> DisplayReadout readDisplay(IO &io, bool admitted) {
     };
     r.status = ReadoutStatus::Complete;
     const uint32_t power = add(0x45404);
-    if (r.status != ReadoutStatus::Complete) return r;
+    if (r.status != ReadoutStatus::Complete) return;
     // Always-on / PW1 display state, including BIOS and DDI I/O ownership.
     const uint32_t common[] {0x45400, 0x45408, 0x4540C, 0x45450, 0x45454, 0x4545C,
         0x45420, 0x45424, 0x45444, 0x42000, 0x42084,
@@ -188,6 +193,12 @@ template<class IO> DisplayReadout readDisplay(IO &io, bool admitted) {
     const auto after = add(0x45404);
     if (r.status == ReadoutStatus::Complete && after != power)
         r.status = ReadoutStatus::PowerChanged;
+}
+// Value-returning callers retain the existing API. Early bootstrap uses the
+// in-place overload with one allocated snapshot instead of stacked copies.
+template<class IO> DisplayReadout readDisplay(IO &io, bool admitted) {
+    DisplayReadout r;
+    readDisplay(io,admitted,r);
     return r;
 }
 
