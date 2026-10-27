@@ -49,7 +49,7 @@ OS別の検証範囲と残る問題は[動作確認済みの機能と既知の�
 CPUモデル名や機種固有の設定は不要ですが、実機での動作確認は残っています。
 受付IDの一覧と対応する資源構成は[デバイス選択](docs/device-selection.md)を参照してください。
 
-実験的に、Alder Lake-N / Twin LakeとAlder Lake-H/P/U / Raptor Lake-H/P/Uの内蔵eDPを実装しています。対象はfirmwareで一意に記述されたCombo A/Bの単一パネルとPPS0・PCH PWMによる輝度制御です。CPU試験とdonor再生試験のみで、実機未検証です。同じソースrevisionからビルドしたWhateverXeとAppleIntelTGLCompatを組み合わせてください。条件は[表示の制限](docs/device-selection.md#display-limits)を参照してください。
+実験的に、Alder Lake-N / Twin LakeとAlder Lake-H/P/U / Raptor Lake-H/P/Uの内蔵eDPを実装しています。対象はfirmwareで一意に記述されたCombo A/Bの単一パネルとPPS0・PCH PWMによる輝度制御です。CPU試験とdonor再生試験のみで、実機未検証です。対応するWhateverXe Graphicsリリースと組み合わせて使用してください。条件は[表示の制限](docs/device-selection.md#display-limits)を参照してください。
 
 ### 対応に追加改修が必要
 
