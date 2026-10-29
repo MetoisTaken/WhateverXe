@@ -242,11 +242,15 @@ static bool display13Offline;
 static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &bar2Length) {
     bar0Length=bar2Length=0;
     if(!pci || !checkKernelArgument("-wex-sriov-vf")) return false;
+    const auto identity=pci->configRead32(0);
+    // Do not touch BAR or root properties for the emulated display device.
+    // The opt-in diagnostic is intended only for the A780 SR-IOV function;
+    // this guard keeps the normal QEMU-display boot path byte-for-byte inert.
+    if(identity!=0xA7808086) return false;
     auto bar0=pci->getDeviceMemoryWithRegister(0x10);
     auto bar2=pci->getDeviceMemoryWithRegister(0x18);
     if(bar0) bar0Length=bar0->getLength();
     if(bar2) bar2Length=bar2->getLength();
-    const auto identity=pci->configRead32(0);
     const auto command=pci->configRead16(4);
     const bool candidate=identity==0xA7808086 && bar0Length==0x1000000 &&
         bar2Length>0 && bar2Length<0x40000000;
