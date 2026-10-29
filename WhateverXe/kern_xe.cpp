@@ -222,10 +222,23 @@ static bool xelpSelectedDevice(IOPCIDevice *pci) {
     return pci && pci==xelpSelectedGPU && xelpSelectedProfile.displayAdmitted() &&
         XELP::same(xelpSelectedProfile,XELP::deviceProfile(pci));
 }
+static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &bar2Length);
 // SR-IOV VF diagnostics are deliberately opt-in. A VF carries the same
 // device ID as its PF, but exposes a smaller/virtualised aperture and a
 // different control contract. Record that evidence without admitting it to
 // the native PF path; the VF backend will be added after its contracts exist.
+static bool xelpDisplay13RenderDevice(IOPCIDevice *pci) {
+    return (xelpSelectedProfile.family==XELP::Family::AlderLakeN ||
+        xelpSelectedProfile.mobileDisplay13()) && xelpSelectedDevice(pci);
+}
+static bool xelpDisplay13Device(IOPCIDevice *pci) {
+    return (XELP::displayAdapter(xelpSelectedProfile.family)==XELP::DisplayAdapter::ADLN || xelpSelectedProfile.mobileDisplay13()) &&
+        xelpSelectedProfile.display==XELP::Display::XeLPD && xelpSelectedDevice(pci);
+}
+// Detailed read-only display evidence is opt-in; control and first-fault
+// receipts remain active in the ordinary AlderLakeN profile.
+static bool display13TraceEnabled;
+static bool display13Offline;
 static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &bar2Length) {
     bar0Length=bar2Length=0;
     if(!pci || !checkKernelArgument("-wex-sriov-vf")) return false;
@@ -253,18 +266,6 @@ static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &
     }
     return candidate;
 }
-static bool xelpDisplay13RenderDevice(IOPCIDevice *pci) {
-    return (xelpSelectedProfile.family==XELP::Family::AlderLakeN ||
-        xelpSelectedProfile.mobileDisplay13()) && xelpSelectedDevice(pci);
-}
-static bool xelpDisplay13Device(IOPCIDevice *pci) {
-    return (XELP::displayAdapter(xelpSelectedProfile.family)==XELP::DisplayAdapter::ADLN || xelpSelectedProfile.mobileDisplay13()) &&
-        xelpSelectedProfile.display==XELP::Display::XeLPD && xelpSelectedDevice(pci);
-}
-// Detailed read-only display evidence is opt-in; control and first-fault
-// receipts remain active in the ordinary AlderLakeN profile.
-static bool display13TraceEnabled;
-static bool display13Offline;
 static XELPMemory::Layout xelpMemory;
 static uint16_t xelpMemoryGGC;
 static XELPMemory::Layout xelpPhysicalMemory(IOPCIDevice *pci) {
