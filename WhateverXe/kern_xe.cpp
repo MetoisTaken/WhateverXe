@@ -252,7 +252,8 @@ static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &
     if(bar0) bar0Length=bar0->getLength();
     if(bar2) bar2Length=bar2->getLength();
     const auto command=pci->configRead16(4);
-    const bool candidate=identity==0xA7808086 && bar0Length==0x1000000 &&
+    const bool candidate=identity==0xA7808086 &&
+        (bar0Length==0 || bar0Length==0x1000000) &&
         bar2Length>0 && bar2Length<0x40000000;
     if(candidate) {
         SYSLOG("igfx","SR-IOV VF diagnostics: identity=%08x command=%04x BAR0=%llx BAR2=%llx",
@@ -4257,6 +4258,17 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 	sriovVFRequested=checkKernelArgument("-wex-sriov-vf");
 	sriovVFDetected=xelpDetectSRIOVVF(physicalGPU,sriovVFBar0Length,sriovVFBar2Length);
 	selectProfile(XELP::deviceProfile(physicalGPU));
+	// A detected VF is diagnostic-only until a VF-specific BAR/interrupt/
+	// firmware backend exists. Never send its virtual aperture through the
+	// native PF bootstrap; that path assumes the PF's 1 GiB GGTT aperture.
+	if(sriovVFDetected) {
+		tglRequested=tglAcceleratorRequested=false;
+		adlnRequested=adlnDetected=adlnNativeRequested=false;
+		display13FramebufferRequested=adlpDisplaySelected=adlpRenderRequested=false;
+		currentGraphics=currentFramebuffer=nullptr;
+		SYSLOG("igfx","SR-IOV VF detected; native PF path disabled for diagnostics");
+		return;
+	}
     // ADLP_LOAD_ONLY_KERNEL: do not enter TGL MMIO/FIA, bootstrap or VM setup.
     const auto physicalEntry=XELP::deviceEntry(xeProfile.identity);
     adlpLoadOnly=physicalEntry && xeProfile.mobileDisplay13() &&
