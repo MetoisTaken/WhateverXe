@@ -254,17 +254,7 @@ static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &
     const auto command=pci->configRead16(4);
     const bool candidate=identity==0xA7808086 && bar0Length==0x1000000 &&
         bar2Length>0 && bar2Length<0x40000000;
-    auto root=IORegistryEntry::getRegistryRoot();
-    root->setProperty("WhateverXeSRIOVVFRequested",true);
-    root->setProperty("WhateverXeSRIOVIdentity",identity,32);
-    root->setProperty("WhateverXeSRIOVCommand",command,16);
-    root->setProperty("WhateverXeSRIOVBar0Length",bar0Length,64);
-    root->setProperty("WhateverXeSRIOVBar2Length",bar2Length,64);
-    root->setProperty("WhateverXeSRIOVDetected",candidate);
     if(candidate) {
-        pci->setProperty("WhateverXeSRIOVVF",true);
-        pci->setProperty("WhateverXeSRIOVBar0Length",bar0Length,64);
-        pci->setProperty("WhateverXeSRIOVBar2Length",bar2Length,64);
         SYSLOG("igfx","SR-IOV VF diagnostics: identity=%08x command=%04x BAR0=%llx BAR2=%llx",
             identity,command,bar0Length,bar2Length);
     }
