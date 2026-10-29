@@ -6,6 +6,7 @@
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_iokit.hpp>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <IOKit/IORegistryEntry.h>
 XeHost *XeHost::callbackHost;
 struct FramebufferViewer : public IOFramebuffer {
  static IOMemoryMap *&getVramMap(IOFramebuffer *fb) { return static_cast<FramebufferViewer *>(fb)->fVramMap; }
@@ -14,6 +15,24 @@ static const char *graphicsPath[] { "/System/Library/Extensions/IOGraphicsFamily
 static KernelPatcher::KextInfo graphics { "com.apple.iokit.IOGraphicsFamily",graphicsPath,arrsize(graphicsPath),{true},{},KernelPatcher::KextInfo::Unloaded };
 static const char *backlightPath[] { "/System/Library/Extensions/AppleBacklight.kext/Contents/MacOS/AppleBacklight" };
 static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",backlightPath,arrsize(backlightPath),{true},{},KernelPatcher::KextInfo::Unloaded };
+// DeviceInfo normally exposes only the primary IGPU. A passed-through VF can
+// remain a secondary PCI service beside QEMU's primary display, so the opt-in
+// diagnostic path must locate the VF before the host dispatches XE.
+static IOPCIDevice *xelpFindSRIOVVF() {
+ if(!checkKernelArgument("-wex-sriov-vf"))return nullptr;
+ auto iterator=IORegistryEntry::iterateOver(gIOServicePlane,kIORegistryIterateRecursively);
+ if(!iterator)return nullptr;
+ IOPCIDevice *found=nullptr;
+ while(auto entry=iterator->getNextObject()) {
+  auto pci=OSDynamicCast(IOPCIDevice,entry);
+  if(!pci || pci->configRead32(0)!=0xA7808086)continue;
+  auto bar2=pci->getDeviceMemoryWithRegister(0x18);
+  const auto bar2Length=bar2 ? bar2->getLength() : 0;
+  if(bar2Length>0 && bar2Length<0x40000000) {found=pci;break;}
+ }
+ iterator->release();
+ return found;
+}
 void XeHost::init() {
  callbackHost=this;
  PE_parse_boot_argn("gfxrst",&resetFramebuffer,sizeof(resetFramebuffer));
@@ -28,6 +47,7 @@ void XeHost::init() {
 void XeHost::processKernel(KernelPatcher &patcher) {
  auto info=DeviceInfo::create();if(!info)return;
  auto gpu=OSDynamicCast(IOPCIDevice,info->videoBuiltin);
+ if(auto vf=xelpFindSRIOVVF()) {info->videoBuiltin=vf;gpu=vf;}
  // Match WEG ordering: PCI config reads require a published IOPCIDevice.
  const bool published=gpu && WIOKit::awaitPublishing(gpu);
  const auto profile=published ? XELP::deviceProfile(gpu) : XELP::Profile {};
