@@ -88,6 +88,13 @@ private:
 	bool tglActive {false};
 	bool adlnRequested {false};
 	bool adlnDetected {false};
+	// Explicit SR-IOV VF diagnostics are opt-in and do not alter the native
+	// admission path yet. Keep the physical PCI identity and resource lengths
+	// visible before a VF-specific backend is introduced.
+	bool sriovVFRequested {false};
+	bool sriovVFDetected {false};
+	uint64_t sriovVFBar0Length {0};
+	uint64_t sriovVFBar2Length {0};
     // Render and Display selections are independent; shared PHY/port code
     // must not depend on which GT implementation the product uses.
     bool display12SmallGTDetected {},display12SmallGTReady {};

@@ -222,6 +222,37 @@ static bool xelpSelectedDevice(IOPCIDevice *pci) {
     return pci && pci==xelpSelectedGPU && xelpSelectedProfile.displayAdmitted() &&
         XELP::same(xelpSelectedProfile,XELP::deviceProfile(pci));
 }
+// SR-IOV VF diagnostics are deliberately opt-in. A VF carries the same
+// device ID as its PF, but exposes a smaller/virtualised aperture and a
+// different control contract. Record that evidence without admitting it to
+// the native PF path; the VF backend will be added after its contracts exist.
+static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &bar2Length) {
+    bar0Length=bar2Length=0;
+    if(!pci || !checkKernelArgument("-wex-sriov-vf")) return false;
+    auto bar0=pci->getDeviceMemoryWithRegister(0x10);
+    auto bar2=pci->getDeviceMemoryWithRegister(0x18);
+    if(bar0) bar0Length=bar0->getLength();
+    if(bar2) bar2Length=bar2->getLength();
+    const auto identity=pci->configRead32(0);
+    const auto command=pci->configRead16(4);
+    const bool candidate=identity==0xA7808086 && bar0Length==0x1000000 &&
+        bar2Length>0 && bar2Length<0x40000000;
+    auto root=IORegistryEntry::getRegistryRoot();
+    root->setProperty("WhateverXeSRIOVVFRequested",true);
+    root->setProperty("WhateverXeSRIOVIdentity",identity,32);
+    root->setProperty("WhateverXeSRIOVCommand",command,16);
+    root->setProperty("WhateverXeSRIOVBar0Length",bar0Length,64);
+    root->setProperty("WhateverXeSRIOVBar2Length",bar2Length,64);
+    root->setProperty("WhateverXeSRIOVDetected",candidate);
+    if(candidate) {
+        pci->setProperty("WhateverXeSRIOVVF",true);
+        pci->setProperty("WhateverXeSRIOVBar0Length",bar0Length,64);
+        pci->setProperty("WhateverXeSRIOVBar2Length",bar2Length,64);
+        SYSLOG("igfx","SR-IOV VF diagnostics: identity=%08x command=%04x BAR0=%llx BAR2=%llx",
+            identity,command,bar0Length,bar2Length);
+    }
+    return candidate;
+}
 static bool xelpDisplay13RenderDevice(IOPCIDevice *pci) {
     return (xelpSelectedProfile.family==XELP::Family::AlderLakeN ||
         xelpSelectedProfile.mobileDisplay13()) && xelpSelectedDevice(pci);
@@ -4228,6 +4259,8 @@ bool XE::xelpInstallHostRPS(KernelPatcher &patcher,size_t index,mach_vm_address_
 void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 	// This must precede tglLoadHDMIWiring, tglPrepareMMIOUC and TGL FIA reads.
 	auto physicalGPU = OSDynamicCast(IOPCIDevice, info->videoBuiltin);
+	sriovVFRequested=checkKernelArgument("-wex-sriov-vf");
+	sriovVFDetected=xelpDetectSRIOVVF(physicalGPU,sriovVFBar0Length,sriovVFBar2Length);
 	selectProfile(XELP::deviceProfile(physicalGPU));
     // ADLP_LOAD_ONLY_KERNEL: do not enter TGL MMIO/FIA, bootstrap or VM setup.
     const auto physicalEntry=XELP::deviceEntry(xeProfile.identity);
