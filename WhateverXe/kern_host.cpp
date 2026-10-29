@@ -20,7 +20,7 @@ static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",bac
 // diagnostic path must locate the VF before the host dispatches XE.
 static IOPCIDevice *xelpFindSRIOVVF() {
  if(!checkKernelArgument("-wex-sriov-vf"))return nullptr;
- auto iterator=IORegistryEntry::iterateOver(gIOServicePlane,kIORegistryIterateRecursively);
+ auto iterator=IORegistryIterator::iterateOver(gIOServicePlane,kIORegistryIterateRecursively);
  if(!iterator)return nullptr;
  IOPCIDevice *found=nullptr;
  while(auto entry=iterator->getNextObject()) {
