@@ -5,6 +5,8 @@ import subprocess,tempfile
 r=Path(__file__).resolve().parents[1]
 adapter=(r/'WhateverXe/kern_xelp_device.hpp').read_text();adapter=adapter[adapter.index('namespace XELP {'):adapter.rindex('#endif')]
 s=(r/'WhateverXe/kern_host.cpp').read_text();body=s[s.index('void XeHost::processKernel'):s.index('bool XeHost::wrapPanelSetDisplay')]
+helper=r'''static IOPCIDevice *xelpFindSRIOVVF() { return nullptr; }
+'''
 code=r'''
 #include <cstdint>
 #include <cstddef>
@@ -59,7 +61,7 @@ struct XeHost {
  static void wrapPanelSetDisplay(){}static void wrapFramebufferInit(){}
  uintptr_t orgPanelSetDisplay=0,orgFramebufferInit=0;uint8_t *gIOFBVerboseBootPtr=nullptr;
 };
-'''.replace('// DEVICE_ADAPTER',adapter)+body+r'''
+'''.replace('// DEVICE_ADAPTER',adapter+helper)+body+r'''
 int main(){KernelPatcher patcher;IOPCIDevice gpu,mei;
 const char *names[]={nullptr,"IMEI","HECI","MEI"};
 for(unsigned firmware=0;firmware<2;++firmware)for(unsigned me=0;me<5;++me)for(unsigned test=0;test<6;++test){

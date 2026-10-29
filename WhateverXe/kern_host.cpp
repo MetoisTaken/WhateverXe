@@ -47,9 +47,11 @@ void XeHost::init() {
 void XeHost::processKernel(KernelPatcher &patcher) {
  auto info=DeviceInfo::create();if(!info)return;
  auto gpu=OSDynamicCast(IOPCIDevice,info->videoBuiltin);
- if(auto vf=xelpFindSRIOVVF()) {info->videoBuiltin=vf;gpu=vf;}
  // Match WEG ordering: PCI config reads require a published IOPCIDevice.
- const bool published=gpu && WIOKit::awaitPublishing(gpu);
+ bool published=gpu && WIOKit::awaitPublishing(gpu);
+ if(published) {
+  if(auto vf=xelpFindSRIOVVF()) {info->videoBuiltin=vf;gpu=vf;published=WIOKit::awaitPublishing(gpu);}
+ }
  const auto profile=published ? XELP::deviceProfile(gpu) : XELP::Profile {};
  // The host must dispatch framebuffer patches and accelerator rejection
  // hooks even when the selected profile deliberately has no Render backend.
