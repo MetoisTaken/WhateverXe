@@ -153,6 +153,14 @@ void XeHost::processKernel(KernelPatcher &patcher) {
     info->videoBuiltin=vf;gpu=vf;published=WIOKit::awaitPublishing(gpu);
    }
   }
+ } else if(checkKernelArgument("-wex-sriov-vf")) {
+  // QEMU std VGA may leave DeviceInfo without a native videoBuiltin.  The
+  // published S80 VF is still a valid logical A780 target for the opt-in
+  // relay path, so admit it directly instead of abandoning the host setup.
+  if(auto vf=xelpFindSRIOVVF()) {
+   vf->setProperty("WhateverXeSRIOVVFObserved",true);
+   info->videoBuiltin=vf;gpu=vf;published=WIOKit::awaitPublishing(gpu);
+  }
  }
  const auto profile=published ? XELP::deviceProfile(gpu) : XELP::Profile {};
  // The host must dispatch framebuffer patches and accelerator rejection
