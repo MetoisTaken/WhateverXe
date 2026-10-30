@@ -63,9 +63,12 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
   // A780 profile only on this explicit diagnostic path.
   if(serviceName && serviceName[0]=='S')
    IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeLastPCIService",serviceName);
+  const bool serviceVFName=serviceName && (strcmp(serviceName,"S80")==0 || strstr(serviceName,"S80@")!=nullptr);
+  if(serviceVFName)
+   IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeVFServiceSeen",serviceName);
   if(hasPath && strstr(servicePath,"S80"))
    IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeLastPCIPath",servicePath);
-  const bool qemuVFName=hasPath && strstr(servicePath,"S80")!=nullptr;
+  const bool qemuVFName=serviceVFName || (hasPath && strstr(servicePath,"S80")!=nullptr);
   if(qemuVFName)IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeVFNameSeen",true);
   if(identity!=0xA7808086U && identity!=0xA7801AF4U && !qemuVFName)continue;
   ++matches;
