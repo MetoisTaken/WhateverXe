@@ -161,6 +161,17 @@ void XeHost::processKernel(KernelPatcher &patcher) {
  DeviceInfo::deleter(info);
 }
 void XeHost::processKext(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+ // PCI services can be published after processKernel.  Re-run the opt-in
+ // observation during later kext notifications so a secondary VF is captured
+ // once QEMU has exposed its S80 service, without changing normal admission.
+ if(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")) {
+  if(auto vf=xelpFindSRIOVVFCandidate(false)) {
+   vf->setProperty("WhateverXeSRIOVVFObserved",true);
+   const auto bar2=vf->getDeviceMemoryWithRegister(0x18);
+   const uint64_t bar2Length=bar2 ? bar2->getLength() : 0;
+   vf->setProperty("WhateverXeSRIOVVFBar2Length",bar2Length,64);
+  }
+ }
  if(!active)return;
  if(backlight.loadIndex==index) {
   if(backlightEnabled) {
