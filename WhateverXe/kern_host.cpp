@@ -16,7 +16,6 @@ static KernelPatcher::KextInfo graphics { "com.apple.iokit.IOGraphicsFamily",gra
 static const char *backlightPath[] { "/System/Library/Extensions/AppleBacklight.kext/Contents/MacOS/AppleBacklight" };
 static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",backlightPath,arrsize(backlightPath),{true},{},KernelPatcher::KextInfo::Unloaded };
 static IOPCIDevice *xelpPublishedVF;
-static bool xelpVFAdmissionAttempted;
 static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
  if(!pci)return 0;
  const auto raw=pci->configRead32(0);
@@ -117,7 +116,6 @@ static bool xelpMarkSRIOVVFPublish(void *, void *, IOService *service, IONotifie
 }
 void XeHost::init() {
  callbackHost=this;
- xelpVFAdmissionAttempted=false;
  if(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")) {
   if(auto matching=IOService::serviceMatching("IOPCIDevice")) {
    IOService::addMatchingNotification(gIOFirstPublishNotification,matching,xelpMarkSRIOVVFPublish,nullptr,nullptr,0);
@@ -231,6 +229,7 @@ void XeHost::processKernel(KernelPatcher &patcher) {
  DeviceInfo::deleter(info);
 }
 void XeHost::processKext(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+ static bool xelpVFAdmissionAttempted;
  // PCI services can be published after processKernel.  Re-run the opt-in
  // observation during later kext notifications so a secondary VF is captured
  // once QEMU has exposed its S80 service, without changing normal admission.
