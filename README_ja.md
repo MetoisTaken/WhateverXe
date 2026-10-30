@@ -150,6 +150,7 @@ Alder Lake-N / Twin LakeとAlder Lake-H/P/U / Raptor Lake-H/P/UではGPU資源�
 `-wex-display13-offline` はAlder Lake-N / Twin LakeとAlder Lake-H/P/U / Raptor Lake-H/P/Uのnative display controller初期化を有効に保ち、選択した出力を未接続として扱います。FB診断でHPD/EDIDとmode設定を切り離すための設定で、表示成立を意味しません。
 `-wex-sriov-vf` はSR-IOV VFの読み取り専用リソース診断を有効にします。VFアクセラレーションは有効になりません。
 `-wex-sriov-vf-observe` は渡されたVFをIORegistryに記録しますが、Appleのprimary displayには選択しません。将来のGuCベースVF render backendを開発するためのboot-control実験であり、ハードウェアアクセラレーションではありません。
+`-wex-sriov-vf-mmio-probe` は渡されたVFへ4 dwordのGuC MMIO relay handshakeだけを限定的に送信し、応答をIORegistryへ記録します。native display、GGTT、割り込み、command submission経路は有効化しません。
 
 ## 動作確認済みの機能と既知の問題
 

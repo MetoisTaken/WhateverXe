@@ -9,6 +9,8 @@ int main() {
     static_assert(VFCapabilityRegister == 0x1901F8U);
     static_assert(MMIOUpdateGGTTWords == 4U);
     static_assert(MMIORelayAction == 0x5005U);
+    static_assert(MMIOScratchBase == 0x190240U);
+    static_assert(MMIOHostInterrupt == 0x1901F0U);
     static_assert(mmioRelayHeader(MMIOHandshakeOpcode) == 0x0F015005U);
     static_assert(packVersion(1U, 2U) == 0x00010002U);
     static_assert(packGGTTControl(0x12345000U, GGTTMode::Replicate, 7U) ==
@@ -38,6 +40,8 @@ int main() {
     assert(requestHeaderValid(runtime.words[0], MMIOGetRuntimeOpcode));
     assert(responseHeaderValid(0xFF000000U));
     assert(!responseHeaderValid(0x6F000000U));
+    assert(responseMajor(0x00010002U) == 1U);
+    assert(responseMinor(0x00010002U) == 2U);
 
     Contract vf {A780Identity,0x0002,VFBar0Length,0x10000000ULL,true,true};
     assert(vf.identityMatches());

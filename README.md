@@ -201,6 +201,9 @@ Temporary development diagnostic: `-wex-adlp-readout` captures ADL-P boot resour
 `-wex-display13-offline` keeps native display controller initialization enabled on Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U but reports selected outputs as disconnected, isolating HPD/EDID and mode programming for framebuffer diagnostics. It does not establish display operation.
 `-wex-sriov-vf` enables opt-in, read-only SR-IOV VF resource diagnostics. It does not enable VF acceleration.
 `-wex-sriov-vf-observe` records a passed VF in IORegistry without selecting it as Apple's primary display. This is a boot-control experiment for developing the future GuC-backed VF render backend; it is not hardware acceleration.
+`-wex-sriov-vf-mmio-probe` additionally sends only the bounded four-dword GuC
+MMIO relay handshake to a passed VF and records the response in IORegistry. It
+does not enable native display, GGTT, interrupt, or command submission paths.
 
 ## Tested features and known issues
 

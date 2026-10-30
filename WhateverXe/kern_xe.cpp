@@ -267,6 +267,67 @@ static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &
     }
     return candidate;
 }
+
+// Execute only the VF bootstrap handshake over the Gen11+ GuC scratch
+// registers.  This is deliberately opt-in and bounded: no native display,
+// GGTT, reset, or command-submission path is entered by this probe.  The
+// request is the same four-dword MMIO envelope used by i915's VF driver;
+// successful evidence is published so a real backend can be enabled against
+// an observed contract instead of guessing from the shared A780 device ID.
+static bool xelpSRIOVMMIOHandshake(IOPCIDevice *pci, uint64_t *evidence,
+    uint32_t evidenceWords) {
+    if(!pci || !evidence || evidenceWords<16 ||
+       !checkKernelArgument("-wex-sriov-vf-mmio-probe")) return false;
+    memset(evidence,0,sizeof(uint64_t)*evidenceWords);
+    evidence[0]=1; // probe format version
+    evidence[1]=XELPSRIOV::MMIOScratchBase;
+    evidence[2]=XELPSRIOV::MMIOHostInterrupt;
+    evidence[3]=XELPSRIOV::MMIOHostInterruptTrigger;
+    if(!(pci->configRead16(4)&2)) {evidence[4]=1;return false;}
+    auto map=pci->mapDeviceMemoryWithRegister(0x10,kIOMapInhibitCache);
+    if(!map) {evidence[4]=2;return false;}
+    const auto length=map->getLength();
+    evidence[5]=length;
+    if(!map->getVirtualAddress() || length<XELPSRIOV::MMIOScratchBase+16) {
+        evidence[4]=3;map->release();return false;
+    }
+    auto base=reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress());
+    auto read=[&](uint32_t offset)->uint32_t {
+        return *reinterpret_cast<volatile uint32_t *>(base+offset);
+    };
+    auto write=[&](uint32_t offset,uint32_t value) {
+        *reinterpret_cast<volatile uint32_t *>(base+offset)=value;
+    };
+    const auto request=XELPSRIOV::makeHandshakeRequest(1U,0U);
+    evidence[6]=request.words[0];evidence[7]=request.words[1];
+    if(!XELPSRIOV::requestHeaderValid(request.words[0],XELPSRIOV::MMIOHandshakeOpcode)) {
+        evidence[4]=4;map->release();return false;
+    }
+    for(uint32_t i=0;i<XELPSRIOV::MMIOScratchCount;++i)
+        write(XELPSRIOV::MMIOScratchBase+i*4,request.words[i]);
+    __asm__ volatile("mfence" ::: "memory");
+    write(XELPSRIOV::MMIOHostInterrupt,XELPSRIOV::MMIOHostInterruptTrigger);
+    __asm__ volatile("mfence" ::: "memory");
+    evidence[8]=1; // request submitted
+    uint32_t header=0;
+    uint32_t polls=0;
+    for(;polls<1000;++polls) {
+        header=read(XELPSRIOV::MMIOScratchBase);
+        if(header&XELPSRIOV::HXGOriginMask) break;
+        IODelay(100);
+    }
+    evidence[9]=polls;evidence[10]=header;
+    for(uint32_t i=1;i<XELPSRIOV::MMIOScratchCount;++i)
+        evidence[10+i]=read(XELPSRIOV::MMIOScratchBase+i*4);
+    const bool response=XELPSRIOV::responseHeaderValid(header);
+    if(response) {
+        evidence[4]=5;
+        evidence[14]=XELPSRIOV::responseMajor(static_cast<uint32_t>(evidence[11]));
+        evidence[15]=XELPSRIOV::responseMinor(static_cast<uint32_t>(evidence[11]));
+    } else evidence[4]=polls<1000 ? 6 : 7;
+    map->release();
+    return response;
+}
 static XELPMemory::Layout xelpMemory;
 static uint16_t xelpMemoryGGC;
 static XELPMemory::Layout xelpPhysicalMemory(IOPCIDevice *pci) {
@@ -4276,6 +4337,14 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 			XELPSRIOV::MMIOHandshakeOpcode,XELPSRIOV::MMIOUpdateGGTTWords,
 			XELPSRIOV::MMIOGetRuntimeOpcode};
 		physicalGPU->setProperty("WEXSRIOVVFContract",contract,sizeof(contract));
+		if(checkKernelArgument("-wex-sriov-vf-mmio-probe")) {
+			uint64_t evidence[16] {};
+			const bool relay=xelpSRIOVMMIOHandshake(physicalGPU,evidence,arrsize(evidence));
+			physicalGPU->setProperty("WEXSRIOVVFMMIOProbe",evidence,sizeof(evidence));
+			physicalGPU->setProperty("WEXSRIOVVFRelayHandshake",relay);
+			SYSLOG("igfx","SR-IOV VF MMIO relay handshake=%u status=%llu polls=%llu version=%llu.%llu",
+				relay,evidence[4],evidence[9],evidence[14],evidence[15]);
+		}
 		tglRequested=tglAcceleratorRequested=false;
 		adlnRequested=adlnDetected=adlnNativeRequested=false;
 		display13FramebufferRequested=adlpDisplaySelected=adlpRenderRequested=false;

@@ -31,6 +31,10 @@ static constexpr uint16_t MMIOUpdateGGTTOpcode = 0x02U;
 static constexpr uint16_t MMIOGetRuntimeOpcode = 0x10U;
 static constexpr uint16_t MMIORelayAction = 0x5005U;
 static constexpr uint32_t MMIORelayMagic = 0x0FU;
+static constexpr uint32_t MMIOScratchBase = 0x190240U;
+static constexpr uint32_t MMIOScratchCount = 4U;
+static constexpr uint32_t MMIOHostInterrupt = 0x1901F0U;
+static constexpr uint32_t MMIOHostInterruptTrigger = 0x1U;
 static constexpr uint16_t MMIOHandshakeWords = 4U;
 static constexpr uint16_t MMIOUpdateGGTTWords = 4U;
 static constexpr uint16_t MMIOGetRuntimeWords = 4U;
@@ -112,6 +116,14 @@ constexpr bool responseHeaderValid(uint32_t header, uint32_t magic = MMIORelayMa
     return (header & HXGOriginMask) != 0U &&
         (header & HXGTypeMask) == 0x70000000U &&
         (header & MMIORelayMagicMask) == ((magic & 0xFU) << 24);
+}
+
+constexpr uint16_t responseMajor(uint32_t version) {
+    return static_cast<uint16_t>(version >> 16);
+}
+
+constexpr uint16_t responseMinor(uint32_t version) {
+    return static_cast<uint16_t>(version & 0xFFFFU);
 }
 
 struct Contract {
