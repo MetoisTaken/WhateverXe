@@ -222,7 +222,8 @@ static bool xelpSelectedDevice(IOPCIDevice *pci) {
     return pci && pci==xelpSelectedGPU && xelpSelectedProfile.displayAdmitted() &&
         XELP::same(xelpSelectedProfile,XELP::deviceProfile(pci));
 }
-static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &bar2Length);
+static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &bar2Length,
+    uint16_t &command, bool &bar0Enabled, bool &bar2Virtual);
 // SR-IOV VF diagnostics are deliberately opt-in. A VF carries the same
 // device ID as its PF, but exposes a smaller/virtualised aperture and a
 // different control contract. Record that evidence without admitting it to
@@ -239,8 +240,9 @@ static bool xelpDisplay13Device(IOPCIDevice *pci) {
 // receipts remain active in the ordinary AlderLakeN profile.
 static bool display13TraceEnabled;
 static bool display13Offline;
-static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &bar2Length) {
-    bar0Length=bar2Length=0;
+static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &bar2Length,
+    uint16_t &command, bool &bar0Enabled, bool &bar2Virtual) {
+    bar0Length=bar2Length=0;command=0;bar0Enabled=false;bar2Virtual=false;
     if(!pci || !checkKernelArgument("-wex-sriov-vf")) return false;
     const auto identity=pci->configRead32(0);
     // Do not touch BAR or root properties for the emulated display device.
@@ -251,13 +253,17 @@ static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &
     auto bar2=pci->getDeviceMemoryWithRegister(0x18);
     if(bar0) bar0Length=bar0->getLength();
     if(bar2) bar2Length=bar2->getLength();
-    const auto command=pci->configRead16(4);
+    command=pci->configRead16(4);
+    bar0Enabled=(command&2)!=0;
+    // Intel's SR-IOV VF exposes a virtual/limited aperture instead of the
+    // PF's 1 GiB GGTT BAR2. Keep this explicit for the future VF backend.
+    bar2Virtual=bar2Length>0 && bar2Length<0x40000000;
     const bool candidate=identity==0xA7808086 &&
         (bar0Length==0 || bar0Length==0x1000000) &&
         bar2Length>0 && bar2Length<0x40000000;
     if(candidate) {
-        SYSLOG("igfx","SR-IOV VF diagnostics: identity=%08x command=%04x BAR0=%llx BAR2=%llx",
-            identity,command,bar0Length,bar2Length);
+        SYSLOG("igfx","SR-IOV VF contract: identity=%08x command=%04x BAR0=%llx (%u) BAR2=%llx (virtual=%u)",
+            identity,command,bar0Length,bar0Enabled,bar2Length,bar2Virtual);
     }
     return candidate;
 }
@@ -4256,12 +4262,16 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 	// This must precede tglLoadHDMIWiring, tglPrepareMMIOUC and TGL FIA reads.
 	auto physicalGPU = OSDynamicCast(IOPCIDevice, info->videoBuiltin);
 	sriovVFRequested=checkKernelArgument("-wex-sriov-vf");
-	sriovVFDetected=xelpDetectSRIOVVF(physicalGPU,sriovVFBar0Length,sriovVFBar2Length);
+	sriovVFDetected=xelpDetectSRIOVVF(physicalGPU,sriovVFBar0Length,sriovVFBar2Length,
+        sriovVFCommand,sriovVFBar0Enabled,sriovVFBar2Virtual);
 	selectProfile(XELP::deviceProfile(physicalGPU));
 	// A detected VF is diagnostic-only until a VF-specific BAR/interrupt/
 	// firmware backend exists. Never send its virtual aperture through the
 	// native PF bootstrap; that path assumes the PF's 1 GiB GGTT aperture.
 	if(sriovVFDetected) {
+		uint64_t contract[] {1,sriovVFCommand,sriovVFBar0Length,sriovVFBar2Length,
+			sriovVFBar0Enabled,sriovVFBar2Virtual};
+		physicalGPU->setProperty("WEXSRIOVVFContract",contract,sizeof(contract));
 		tglRequested=tglAcceleratorRequested=false;
 		adlnRequested=adlnDetected=adlnNativeRequested=false;
 		display13FramebufferRequested=adlpDisplaySelected=adlpRenderRequested=false;

@@ -95,6 +95,9 @@ private:
 	bool sriovVFDetected {false};
 	uint64_t sriovVFBar0Length {0};
 	uint64_t sriovVFBar2Length {0};
+	uint16_t sriovVFCommand {0};
+	bool sriovVFBar0Enabled {false};
+	bool sriovVFBar2Virtual {false};
     // Render and Display selections are independent; shared PHY/port code
     // must not depend on which GT implementation the product uses.
     bool display12SmallGTDetected {},display12SmallGTReady {};
