@@ -84,8 +84,31 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  return found;
 }
 static IOPCIDevice *xelpFindSRIOVVF() { return xelpFindSRIOVVFCandidate(true); }
+// Match-notification callbacks run while the registry is publishing.  Do not
+// walk the registry from that context: mark the already-matched S80 service
+// directly and let the normal scanner consume the candidate property later.
+static bool xelpMarkSRIOVVFPublish(void *, void *, IOService *service, IONotifier *) {
+ if(!(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")))return true;
+ const auto name=service ? service->getName() : nullptr;
+ const bool vfName=name && (strcmp(name,"S80")==0 || strstr(name,"S80@")!=nullptr);
+ if(!vfName)return true;
+ auto root=IORegistryEntry::getRegistryRoot();
+ root->setProperty("WhateverXeVFServiceSeen",name);
+ root->setProperty("WhateverXeVFNameSeen",true);
+ root->setProperty("WhateverXeSRIOVVFMatchCount",1U,32);
+ auto pci=static_cast<IOPCIDevice *>(service);
+ pci->setProperty("WhateverXeSRIOVVFCandidate",true);
+ pci->setProperty("WhateverXeSRIOVVFObserved",true);
+ return true;
+}
 void XeHost::init() {
  callbackHost=this;
+ if(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")) {
+  if(auto matching=IOService::serviceMatching("IOPCIDevice")) {
+   IOService::addMatchingNotification(gIOFirstPublishNotification,matching,xelpMarkSRIOVVFPublish,nullptr,nullptr,0);
+   matching->release();
+  }
+ }
  PE_parse_boot_argn("gfxrst",&resetFramebuffer,sizeof(resetFramebuffer));
  if(resetFramebuffer>=FB_TOTAL)resetFramebuffer=FB_DETECT;
  lilu.onPatcherLoadForce([](void *u,KernelPatcher &p){static_cast<XeHost *>(u)->processKernel(p);},this);
