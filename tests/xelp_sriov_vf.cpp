@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstdio>
 #include "kern_xelp_sriov_vf.hpp"
 
 int main() {
