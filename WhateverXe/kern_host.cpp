@@ -5,7 +5,6 @@
 #include "kern_backlight_profile.hpp"
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_iokit.hpp>
-#include <IOKit/IOLib.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/IORegistryEntry.h>
 XeHost *XeHost::callbackHost;
@@ -85,19 +84,8 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  return found;
 }
 static IOPCIDevice *xelpFindSRIOVVF() { return xelpFindSRIOVVFCandidate(true); }
-static void xelpDeferredSRIOVVFScan(void *) {
- IOSleep(5000);
- if(!(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")))return;
- if(auto vf=xelpFindSRIOVVFCandidate(false)) {
-  vf->setProperty("WhateverXeSRIOVVFObserved",true);
-  const auto bar2=vf->getDeviceMemoryWithRegister(0x18);
-  const uint64_t bar2Length=bar2 ? bar2->getLength() : 0;
-  vf->setProperty("WhateverXeSRIOVVFBar2Length",bar2Length,64);
- }
-}
 void XeHost::init() {
  callbackHost=this;
- if(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe"))IOCreateThread(xelpDeferredSRIOVVFScan,nullptr);
  PE_parse_boot_argn("gfxrst",&resetFramebuffer,sizeof(resetFramebuffer));
  if(resetFramebuffer>=FB_TOTAL)resetFramebuffer=FB_DETECT;
  lilu.onPatcherLoadForce([](void *u,KernelPatcher &p){static_cast<XeHost *>(u)->processKernel(p);},this);
