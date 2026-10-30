@@ -16,6 +16,7 @@ struct IOService:OSObject {OSObject *provider {};OSObject *getProvider(){return 
 struct IOPCIDevice:OSObject {uint32_t identity {};uint8_t revision {};OSObject *property {};
  OSObject *getProperty(const char *key){assert(!strcmp(key,"device-id"));return property;}
  uint32_t configRead32(unsigned r){assert(!r);return identity;}
+ uint16_t configRead16(unsigned r){assert(r==0 || r==2);return r==0?static_cast<uint16_t>(identity):static_cast<uint16_t>(identity>>16);}
  uint8_t configRead8(unsigned r){assert(r==8);return revision;}
 };
 struct IOMemoryMap:OSObject {uintptr_t address {};uint64_t bytes {};
