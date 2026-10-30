@@ -21,11 +21,15 @@ static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",bac
 static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  // Observe mode records a passed VF without selecting it as Apple's primary
  // display. This gives the future VF backend a bootable control experiment.
- if(!checkKernelArgument("-wex-sriov-vf") && !checkKernelArgument("-wex-sriov-vf-observe"))return nullptr;
+ const bool requested=checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe");
+ IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFScanRequested",requested);
+ if(!requested)return nullptr;
  auto iterator=IORegistryIterator::iterateOver(gIOServicePlane,kIORegistryIterateRecursively);
  if(!iterator)return nullptr;
  IOPCIDevice *found=nullptr;
+ uint32_t scanned=0,matches=0;
  while(auto entry=iterator->getNextObject()) {
+  ++scanned;
   auto pci=OSDynamicCast(IOPCIDevice,entry);
   if(!pci)continue;
   const auto identity=pci->configRead32(0);
@@ -33,11 +37,15 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
   // Intel matcher away from the VF.  WhateverXe maps it back to the logical
   // A780 profile only on this explicit diagnostic path.
   if(identity!=0xA7808086U && identity!=0xA7801AF4U)continue;
+  ++matches;
+  pci->setProperty("WhateverXeSRIOVVFCandidate",true);
   auto bar2=pci->getDeviceMemoryWithRegister(0x18);
   const auto bar2Length=bar2 ? bar2->getLength() : 0;
   if(!requireAperture || (bar2Length>0 && bar2Length<0x40000000)) {found=pci;break;}
  }
  iterator->release();
+ IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFScanCount",scanned,32);
+ IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFMatchCount",matches,32);
  return found;
 }
 static IOPCIDevice *xelpFindSRIOVVF() { return xelpFindSRIOVVFCandidate(true); }
