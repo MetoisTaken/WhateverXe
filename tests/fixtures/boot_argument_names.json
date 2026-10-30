@@ -140,5 +140,6 @@
   "-wex-adlp-load-only": [],
   "-wex-display13-offline": [],
   "-wex-sriov-vf": [],
-  "-wex-sriov-vf-observe": []
+  "-wex-sriov-vf-observe": [],
+  "-wex-sriov-vf-mmio-probe": []
 }
