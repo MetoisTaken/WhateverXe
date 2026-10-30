@@ -274,3 +274,7 @@ See [LICENSE.txt](LICENSE.txt). Lilu and MacKernelSDK are separate dependencies.
 Thanks to [JulioNectar/XPS13Plus](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe) for sharing its Xe graphics work. Its compiler adapter and LLVM bridge informed the OS-native AIR conversion used in WhateverXe Graphics.
 
 Internal-panel work also draws on [WhateverXe-RaptorLakeP](https://github.com/samranahmad09/WhateverXe-RaptorLakeP), [X1Carbon-G11](https://github.com/dssoftx/Hackintosh-X1Carbon-G11-IrisXe-Tahoe), XPS13Plus and the [Linux i915 display sources](https://github.com/torvalds/linux/tree/v6.12/drivers/gpu/drm/i915/display) for hardware behavior and implementation comparisons.
+-wex-sriov-vf now also installs the existing load-only probe/start barriers for
+AppleIntelFramebuffer and IntelAccelerator.  This keeps a VF's virtual BAR
+contract from entering the native PF path while the GuC relay backend is being
+developed; it is not acceleration by itself.

@@ -4332,6 +4332,12 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 	// firmware backend exists. Never send its virtual aperture through the
 	// native PF bootstrap; that path assumes the PF's 1 GiB GGTT aperture.
 	if(sriovVFDetected) {
+		// A VF may still be published as the system's videoBuiltin by IOKit,
+		// but it does not expose the PF BAR0/Display13 contract expected by
+		// AppleIntelFramebuffer and IntelAccelerator.  Reuse the existing
+		// load-only barriers so those native probes and starts cannot wedge the
+		// guest before the relay backend has installed its own provider.
+		adlpLoadOnly=true;
 		uint64_t contract[] {1,sriovVFCommand,sriovVFBar0Length,sriovVFBar2Length,
 			sriovVFBar0Enabled,sriovVFBar2Virtual,
 			XELPSRIOV::MMIOHandshakeOpcode,XELPSRIOV::MMIOUpdateGGTTWords,
@@ -4349,7 +4355,7 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 		adlnRequested=adlnDetected=adlnNativeRequested=false;
 		display13FramebufferRequested=adlpDisplaySelected=adlpRenderRequested=false;
 		currentGraphics=currentFramebuffer=nullptr;
-		SYSLOG("igfx","SR-IOV VF detected; native PF path disabled; GuC relay backend required");
+		SYSLOG("igfx","SR-IOV VF detected; native framebuffer/accelerator probes blocked; GuC relay backend required");
 		return;
 	}
     // ADLP_LOAD_ONLY_KERNEL: do not enter TGL MMIO/FIA, bootstrap or VM setup.
