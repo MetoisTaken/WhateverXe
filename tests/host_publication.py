@@ -7,6 +7,8 @@ adapter=(r/'WhateverXe/kern_xelp_device.hpp').read_text();adapter=adapter[adapte
 s=(r/'WhateverXe/kern_host.cpp').read_text();body=s[s.index('void XeHost::processKernel'):s.index('bool XeHost::wrapPanelSetDisplay')]
 helper=r'''static IOPCIDevice *xelpFindSRIOVVFCandidate(bool) { return nullptr; }
 static IOPCIDevice *xelpFindSRIOVVF() { return nullptr; }
+struct KernelPatcher;
+static KernelPatcher *xelpKernelPatcher=nullptr;
 '''
 code=r'''
 #include <cstdint>

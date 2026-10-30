@@ -16,6 +16,9 @@ static KernelPatcher::KextInfo graphics { "com.apple.iokit.IOGraphicsFamily",gra
 static const char *backlightPath[] { "/System/Library/Extensions/AppleBacklight.kext/Contents/MacOS/AppleBacklight" };
 static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",backlightPath,arrsize(backlightPath),{true},{},KernelPatcher::KextInfo::Unloaded };
 static IOPCIDevice *xelpPublishedVF;
+static KernelPatcher *xelpKernelPatcher;
+static bool xelpVFAdmissionStarted;
+static XeHost *xelpHost;
 static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
  if(!pci)return 0;
  const auto raw=pci->configRead32(0);
@@ -112,10 +115,21 @@ static bool xelpMarkSRIOVVFPublish(void *, void *, IOService *service, IONotifie
  xelpPublishedVF->retain();
  pci->setProperty("WhateverXeSRIOVVFCandidate",true);
  pci->setProperty("WhateverXeSRIOVVFObserved",true);
+ if(xelpHost && xelpKernelPatcher && !xelpVFAdmissionStarted) {
+  // The PCI publication can follow Lilu's one-shot kernel callback.  Reuse
+  // the already-live patcher on this notification instead of starting a
+  // detached registry thread or scanning from the callback.
+  xelpVFAdmissionStarted=true;
+  root->setProperty("WhateverXeHostDeferredAdmission",true);
+  xelpHost->processKernel(*xelpKernelPatcher);
+ }
  return true;
 }
 void XeHost::init() {
  callbackHost=this;
+ xelpHost=this;
+ xelpKernelPatcher=nullptr;
+ xelpVFAdmissionStarted=false;
  if(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")) {
   if(auto matching=IOService::serviceMatching("IOPCIDevice")) {
    IOService::addMatchingNotification(gIOFirstPublishNotification,matching,xelpMarkSRIOVVFPublish,nullptr,nullptr,0);
@@ -132,6 +146,7 @@ void XeHost::init() {
  XeDataAccess::init();
 }
 void XeHost::processKernel(KernelPatcher &patcher) {
+ xelpKernelPatcher=&patcher;
  auto root=IORegistryEntry::getRegistryRoot();
  root->setProperty("WhateverXeHostInfoCreated",false);
  root->setProperty("WhateverXeHostInitialGPU",false);
@@ -229,7 +244,6 @@ void XeHost::processKernel(KernelPatcher &patcher) {
  DeviceInfo::deleter(info);
 }
 void XeHost::processKext(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
- static bool xelpVFAdmissionAttempted;
  // PCI services can be published after processKernel.  Re-run the opt-in
  // observation during later kext notifications so a secondary VF is captured
  // once QEMU has exposed its S80 service, without changing normal admission.
@@ -239,15 +253,6 @@ void XeHost::processKext(KernelPatcher &patcher,size_t index,mach_vm_address_t a
    const auto bar2=vf->getDeviceMemoryWithRegister(0x18);
    const uint64_t bar2Length=bar2 ? bar2->getLength() : 0;
    vf->setProperty("WhateverXeSRIOVVFBar2Length",bar2Length,64);
-   if(checkKernelArgument("-wex-sriov-vf") && !xelpVFAdmissionAttempted) {
-    // The VF may be published after Lilu's kernel-patcher callback has
-    // already run.  Re-enter the same admission path once from the first
-    // kext notification that sees the published S80 service; this keeps the
-    // registry callback read-only and avoids a detached worker thread.
-    xelpVFAdmissionAttempted=true;
-    IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeHostDeferredAdmission",true);
-    processKernel(patcher);
-   }
   }
  }
  if(!active)return;
