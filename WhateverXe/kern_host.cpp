@@ -44,9 +44,10 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  auto iterator=IORegistryIterator::iterateOver(gIOServicePlane,kIORegistryIterateRecursively);
  if(!iterator)return nullptr;
  IOPCIDevice *found=nullptr;
- uint32_t scanned=0,matches=0;
+ uint32_t scanned=0,registryPCI=0,matches=0;
  while(auto entry=iterator->getNextObject()) {
   ++scanned;
+  if(entry->getProperty("pcidebug"))++registryPCI;
   // Published PCI nodes carry pcidebug/vendor-id/device-id properties even
   // while their metaclass is not visible to a third-party kext's OSDynamicCast.
   // Use that stable registry contract to obtain the IOPCIDevice service.
@@ -65,6 +66,7 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  }
  iterator->release();
  IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFScanCount",scanned,32);
+ IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFRegistryPCI",registryPCI,32);
  IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFMatchCount",matches,32);
  return found;
 }
