@@ -19,11 +19,11 @@ static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
  if(!pci)return 0;
  const auto raw=pci->configRead32(0);
  const auto words=(static_cast<uint32_t>(pci->configRead16(2))<<16) | pci->configRead16(0);
- const auto name=pci->getName();
- if(name && !strcmp(name,"display")) {
-  pci->setProperty("WhateverXeRawConfig32",raw,32);
-  pci->setProperty("WhateverXeRawConfigWords",words,32);
- }
+ // Keep the raw values on the service while the opt-in VF diagnostic is
+ // active; this also covers IOPCIDevice names such as S80@10 whose IOName is
+ // published separately from getName().
+ pci->setProperty("WhateverXeRawConfig32",raw,32);
+ pci->setProperty("WhateverXeRawConfigWords",words,32);
  if(words==0xA7808086U || words==0xA7801AF4U)return words;
  if(raw==0xA7808086U || raw==0xA7801AF4U)return raw;
  if((raw&0xFFFFU)!=0x1AF4U && (raw>>16)!=0x1AF4U)return raw;
