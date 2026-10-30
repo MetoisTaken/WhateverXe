@@ -47,7 +47,10 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  uint32_t scanned=0,matches=0;
  while(auto entry=iterator->getNextObject()) {
   ++scanned;
-  auto pci=static_cast<IOPCIDevice *>(entry->metaCast("IOPCIDevice"));
+  // Published PCI nodes carry pcidebug/vendor-id/device-id properties even
+  // while their metaclass is not visible to a third-party kext's OSDynamicCast.
+  // Use that stable registry contract to obtain the IOPCIDevice service.
+  auto pci=entry->getProperty("pcidebug") ? static_cast<IOPCIDevice *>(entry) : nullptr;
   if(!pci)continue;
   const auto identity=xelpPCIIdentity(pci);
   // 1af4:a780 is the QEMU generic identity used to keep Apple's native
