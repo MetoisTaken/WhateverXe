@@ -19,6 +19,7 @@ static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
  if(!pci)return 0;
  const auto raw=pci->configRead32(0);
  if(raw==0xA7808086U || raw==0xA7801AF4U)return raw;
+ if((raw&0xFFFFU)!=0x1AF4U && (raw>>16)!=0x1AF4U)return raw;
  // IOPCIDevice exposes the two configuration words independently on macOS;
  // use them when a virtual PCI function presents the dword in the opposite
  // byte order used by QEMU's x-pci identity override.
