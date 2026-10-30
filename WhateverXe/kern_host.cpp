@@ -19,7 +19,9 @@ static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",bac
 // remain a secondary PCI service beside QEMU's primary display, so the opt-in
 // diagnostic path must locate the VF before the host dispatches XE.
 static IOPCIDevice *xelpFindSRIOVVF() {
- if(!checkKernelArgument("-wex-sriov-vf"))return nullptr;
+ // Observe mode records a passed VF without selecting it as Apple's primary
+ // display. This gives the future VF backend a bootable control experiment.
+ if(!checkKernelArgument("-wex-sriov-vf") && !checkKernelArgument("-wex-sriov-vf-observe"))return nullptr;
  auto iterator=IORegistryIterator::iterateOver(gIOServicePlane,kIORegistryIterateRecursively);
  if(!iterator)return nullptr;
  IOPCIDevice *found=nullptr;
@@ -50,7 +52,12 @@ void XeHost::processKernel(KernelPatcher &patcher) {
  // Match WEG ordering: PCI config reads require a published IOPCIDevice.
  bool published=gpu && WIOKit::awaitPublishing(gpu);
  if(published) {
-  if(auto vf=xelpFindSRIOVVF()) {info->videoBuiltin=vf;gpu=vf;published=WIOKit::awaitPublishing(gpu);}
+  if(auto vf=xelpFindSRIOVVF()) {
+   vf->setProperty("WhateverXeSRIOVVFObserved",true);
+   if(checkKernelArgument("-wex-sriov-vf")) {
+    info->videoBuiltin=vf;gpu=vf;published=WIOKit::awaitPublishing(gpu);
+   }
+  }
  }
  const auto profile=published ? XELP::deviceProfile(gpu) : XELP::Profile {};
  // The host must dispatch framebuffer patches and accelerator rejection

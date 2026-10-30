@@ -200,6 +200,7 @@ Temporary development diagnostic: `-wex-adlp-readout` captures ADL-P boot resour
 `-wex-adlp-load-only` blocks both native framebuffer and accelerator probes/starts on a selected ADL-P/RPL-P device, for load-only diagnostics without GPU initialization.
 `-wex-display13-offline` keeps native display controller initialization enabled on Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U but reports selected outputs as disconnected, isolating HPD/EDID and mode programming for framebuffer diagnostics. It does not establish display operation.
 `-wex-sriov-vf` enables opt-in, read-only SR-IOV VF resource diagnostics. It does not enable VF acceleration.
+`-wex-sriov-vf-observe` records a passed VF in IORegistry without selecting it as Apple's primary display. This is a boot-control experiment for developing the future GuC-backed VF render backend; it is not hardware acceleration.
 
 ## Tested features and known issues
 
