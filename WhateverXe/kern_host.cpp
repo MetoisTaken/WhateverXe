@@ -15,6 +15,15 @@ static const char *graphicsPath[] { "/System/Library/Extensions/IOGraphicsFamily
 static KernelPatcher::KextInfo graphics { "com.apple.iokit.IOGraphicsFamily",graphicsPath,arrsize(graphicsPath),{true},{},KernelPatcher::KextInfo::Unloaded };
 static const char *backlightPath[] { "/System/Library/Extensions/AppleBacklight.kext/Contents/MacOS/AppleBacklight" };
 static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",backlightPath,arrsize(backlightPath),{true},{},KernelPatcher::KextInfo::Unloaded };
+static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
+ if(!pci)return 0;
+ const auto raw=pci->configRead32(0);
+ if(raw==0xA7808086U || raw==0xA7801AF4U)return raw;
+ // IOPCIDevice exposes the two configuration words independently on macOS;
+ // use them when a virtual PCI function presents the dword in the opposite
+ // byte order used by QEMU's x-pci identity override.
+ return (static_cast<uint32_t>(pci->configRead16(2))<<16) | pci->configRead16(0);
+}
 // DeviceInfo normally exposes only the primary IGPU. A passed-through VF can
 // remain a secondary PCI service beside QEMU's primary display, so the opt-in
 // diagnostic path must locate the VF before the host dispatches XE.
@@ -32,7 +41,7 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
   ++scanned;
   auto pci=OSDynamicCast(IOPCIDevice,entry);
   if(!pci)continue;
-  const auto identity=pci->configRead32(0);
+  const auto identity=xelpPCIIdentity(pci);
   // 1af4:a780 is the QEMU generic identity used to keep Apple's native
   // Intel matcher away from the VF.  WhateverXe maps it back to the logical
   // A780 profile only on this explicit diagnostic path.

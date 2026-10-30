@@ -236,6 +236,12 @@ static bool xelpDisplay13Device(IOPCIDevice *pci) {
     return (XELP::displayAdapter(xelpSelectedProfile.family)==XELP::DisplayAdapter::ADLN || xelpSelectedProfile.mobileDisplay13()) &&
         xelpSelectedProfile.display==XELP::Display::XeLPD && xelpSelectedDevice(pci);
 }
+static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
+    if(!pci)return 0;
+    const auto raw=pci->configRead32(0);
+    if(raw==0xA7808086U || raw==0xA7801AF4U)return raw;
+    return (static_cast<uint32_t>(pci->configRead16(2))<<16) | pci->configRead16(0);
+}
 // Detailed read-only display evidence is opt-in; control and first-fault
 // receipts remain active in the ordinary AlderLakeN profile.
 static bool display13TraceEnabled;
@@ -244,7 +250,7 @@ static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &
     uint16_t &command, bool &bar0Enabled, bool &bar2Virtual) {
     bar0Length=bar2Length=0;command=0;bar0Enabled=false;bar2Virtual=false;
     if(!pci || !checkKernelArgument("-wex-sriov-vf")) return false;
-    const auto rawIdentity=pci->configRead32(0);
+    const auto rawIdentity=xelpPCIIdentity(pci);
     const auto identity=(rawIdentity==0xA7801AF4U) ? XELPSRIOV::A780Identity : rawIdentity;
     // Do not touch BAR or root properties for the emulated display device.
     // The opt-in diagnostic is intended only for the A780 SR-IOV function;
