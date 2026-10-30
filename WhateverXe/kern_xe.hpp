@@ -22,6 +22,7 @@
 #include "kern_xelp_donor.hpp"
 #include "kern_xelp_display_contract.hpp"
 #include "kern_xelp_link_requirements.hpp"
+#include "kern_xelp_sriov_vf.hpp"
 
 #include "kern_dvmt.hpp"
 #include <Headers/kern_patcher.hpp>
@@ -98,6 +99,7 @@ private:
 	uint16_t sriovVFCommand {0};
 	bool sriovVFBar0Enabled {false};
 	bool sriovVFBar2Virtual {false};
+	XELPSRIOV::Contract sriovVFContract {};
     // Render and Display selections are independent; shared PHY/port code
     // must not depend on which GT implementation the product uses.
     bool display12SmallGTDetected {},display12SmallGTReady {};

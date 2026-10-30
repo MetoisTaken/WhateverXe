@@ -4264,19 +4264,23 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 	sriovVFRequested=checkKernelArgument("-wex-sriov-vf");
 	sriovVFDetected=xelpDetectSRIOVVF(physicalGPU,sriovVFBar0Length,sriovVFBar2Length,
         sriovVFCommand,sriovVFBar0Enabled,sriovVFBar2Virtual);
+	sriovVFContract = XELPSRIOV::Contract {0xA7808086U,sriovVFCommand,sriovVFBar0Length,
+		sriovVFBar2Length,sriovVFBar0Enabled,sriovVFBar2Virtual};
 	selectProfile(XELP::deviceProfile(physicalGPU));
 	// A detected VF is diagnostic-only until a VF-specific BAR/interrupt/
 	// firmware backend exists. Never send its virtual aperture through the
 	// native PF bootstrap; that path assumes the PF's 1 GiB GGTT aperture.
 	if(sriovVFDetected) {
 		uint64_t contract[] {1,sriovVFCommand,sriovVFBar0Length,sriovVFBar2Length,
-			sriovVFBar0Enabled,sriovVFBar2Virtual};
+			sriovVFBar0Enabled,sriovVFBar2Virtual,
+			XELPSRIOV::MMIOHandshakeOpcode,XELPSRIOV::MMIOUpdateGGTTWords,
+			XELPSRIOV::MMIOGetRuntimeOpcode};
 		physicalGPU->setProperty("WEXSRIOVVFContract",contract,sizeof(contract));
 		tglRequested=tglAcceleratorRequested=false;
 		adlnRequested=adlnDetected=adlnNativeRequested=false;
 		display13FramebufferRequested=adlpDisplaySelected=adlpRenderRequested=false;
 		currentGraphics=currentFramebuffer=nullptr;
-		SYSLOG("igfx","SR-IOV VF detected; native PF path disabled for diagnostics");
+		SYSLOG("igfx","SR-IOV VF detected; native PF path disabled; GuC relay backend required");
 		return;
 	}
     // ADLP_LOAD_ONLY_KERNEL: do not enter TGL MMIO/FIA, bootstrap or VM setup.
