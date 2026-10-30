@@ -7,9 +7,16 @@
 namespace XELP {
 inline Profile deviceProfile(IOPCIDevice *pci) {
     if(!pci)return {};
+    // QEMU can intentionally mask a passed VF's Intel identity so Apple's
+    // native Intel driver does not bind to a VF with no PF-style BAR0.  The
+    // experimental VF profile still uses the logical A780 platform data while
+    // the PCI function remains owned by the relay backend.
+    auto identity=pci->configRead32(0);
+    if(identity==0xA7801AF4U)
+        return identify(0xA7808086U,pci->configRead8(8),0xA7808086U);
     const auto property=pci->getProperty("device-id");
     const auto data=OSDynamicCast(OSData,property);
-    return select(pci->configRead32(0),pci->configRead8(8),property!=nullptr,
+    return select(identity,pci->configRead8(8),property!=nullptr,
         data ? data->getBytesNoCopy() : nullptr,data ? data->getLength() : 0);
 }
 }

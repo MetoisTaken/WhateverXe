@@ -278,3 +278,9 @@ Internal-panel work also draws on [WhateverXe-RaptorLakeP](https://github.com/sa
 AppleIntelFramebuffer and IntelAccelerator.  This keeps a VF's virtual BAR
 contract from entering the native PF path while the GuC relay backend is being
 developed; it is not acceleration by itself.
+
+For QEMU VF boot isolation, the passthrough device can be presented as
+`1af4:a780` with `-set device.hostpci0.x-pci-device-id=0xA780` and
+`-set device.hostpci0.x-pci-vendor-id=0x1af4`. With `-wex-sriov-vf`, the
+backend maps that generic PCI identity back to the logical A780 VF profile;
+the Intel native matcher remains unselected until the relay backend is ready.

@@ -27,7 +27,12 @@ static IOPCIDevice *xelpFindSRIOVVF() {
  IOPCIDevice *found=nullptr;
  while(auto entry=iterator->getNextObject()) {
   auto pci=OSDynamicCast(IOPCIDevice,entry);
-  if(!pci || pci->configRead32(0)!=0xA7808086)continue;
+  if(!pci)continue;
+  const auto identity=pci->configRead32(0);
+  // 1af4:a780 is the QEMU generic identity used to keep Apple's native
+  // Intel matcher away from the VF.  WhateverXe maps it back to the logical
+  // A780 profile only on this explicit diagnostic path.
+  if(identity!=0xA7808086U && identity!=0xA7801AF4U)continue;
   auto bar2=pci->getDeviceMemoryWithRegister(0x18);
   const auto bar2Length=bar2 ? bar2->getLength() : 0;
   if(bar2Length>0 && bar2Length<0x40000000) {found=pci;break;}

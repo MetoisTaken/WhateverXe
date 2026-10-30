@@ -244,11 +244,12 @@ static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &
     uint16_t &command, bool &bar0Enabled, bool &bar2Virtual) {
     bar0Length=bar2Length=0;command=0;bar0Enabled=false;bar2Virtual=false;
     if(!pci || !checkKernelArgument("-wex-sriov-vf")) return false;
-    const auto identity=pci->configRead32(0);
+    const auto rawIdentity=pci->configRead32(0);
+    const auto identity=(rawIdentity==0xA7801AF4U) ? XELPSRIOV::A780Identity : rawIdentity;
     // Do not touch BAR or root properties for the emulated display device.
     // The opt-in diagnostic is intended only for the A780 SR-IOV function;
     // this guard keeps the normal QEMU-display boot path byte-for-byte inert.
-    if(identity!=0xA7808086) return false;
+    if(rawIdentity!=0xA7808086U && rawIdentity!=0xA7801AF4U) return false;
     auto bar0=pci->getDeviceMemoryWithRegister(0x10);
     auto bar2=pci->getDeviceMemoryWithRegister(0x18);
     if(bar0) bar0Length=bar0->getLength();
@@ -262,8 +263,8 @@ static bool xelpDetectSRIOVVF(IOPCIDevice *pci, uint64_t &bar0Length, uint64_t &
         (bar0Length==0 || bar0Length==0x1000000) &&
         bar2Length>0 && bar2Length<0x40000000;
     if(candidate) {
-        SYSLOG("igfx","SR-IOV VF contract: identity=%08x command=%04x BAR0=%llx (%u) BAR2=%llx (virtual=%u)",
-            identity,command,bar0Length,bar0Enabled,bar2Length,bar2Virtual);
+        SYSLOG("igfx","SR-IOV VF contract: pci=%08x logical=%08x command=%04x BAR0=%llx (%u) BAR2=%llx (virtual=%u)",
+            rawIdentity,identity,command,bar0Length,bar0Enabled,bar2Length,bar2Virtual);
     }
     return candidate;
 }
