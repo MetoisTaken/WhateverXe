@@ -49,6 +49,9 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
   ++scanned;
   const auto serviceName=entry->getName();
   if(serviceName && serviceName[0]=='S')++registryPCI;
+  char servicePath[256] {};
+  uint32_t servicePathLength=sizeof(servicePath);
+  const bool hasPath=entry->getPath(servicePath,&servicePathLength,gIOServicePlane)==kIOReturnSuccess;
   // Published PCI nodes carry pcidebug/vendor-id/device-id properties even
   // while their metaclass is not visible to a third-party kext's OSDynamicCast.
   // Use that stable registry contract to obtain the IOPCIDevice service.
@@ -60,7 +63,9 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
   // A780 profile only on this explicit diagnostic path.
   if(serviceName && serviceName[0]=='S')
    IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeLastPCIService",serviceName);
-  const bool qemuVFName=serviceName && serviceName[0]=='S' && serviceName[1]=='8' && serviceName[2]=='0';
+  if(hasPath && strstr(servicePath,"S80"))
+   IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeLastPCIPath",servicePath);
+  const bool qemuVFName=hasPath && strstr(servicePath,"S80")!=nullptr;
   if(qemuVFName)IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeVFNameSeen",true);
   if(identity!=0xA7808086U && identity!=0xA7801AF4U && !qemuVFName)continue;
   ++matches;
