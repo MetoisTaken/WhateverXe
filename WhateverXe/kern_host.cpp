@@ -19,7 +19,8 @@ static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
  if(!pci)return 0;
  const auto raw=pci->configRead32(0);
  const auto words=(static_cast<uint32_t>(pci->configRead16(2))<<16) | pci->configRead16(0);
- if((pci->configRead32(8)&0xFFFFFFU)==0x030000U) {
+ const auto name=pci->getName();
+ if(name && !strcmp(name,"display")) {
   pci->setProperty("WhateverXeRawConfig32",raw,32);
   pci->setProperty("WhateverXeRawConfigWords",words,32);
  }
