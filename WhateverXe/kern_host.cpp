@@ -132,6 +132,13 @@ void XeHost::init() {
  XeDataAccess::init();
 }
 void XeHost::processKernel(KernelPatcher &patcher) {
+ auto root=IORegistryEntry::getRegistryRoot();
+ root->setProperty("WhateverXeHostInfoCreated",false);
+ root->setProperty("WhateverXeHostInitialGPU",false);
+ root->setProperty("WhateverXeHostInitialPublished",false);
+ root->setProperty("WhateverXeHostVFFound",false);
+ root->setProperty("WhateverXeHostVFPublished",false);
+ root->setProperty("WhateverXeHostProfileAdmitted",false);
  // A passed-through VF is a secondary PCI service when QEMU's std VGA remains
  // the primary display. Publish the observation before DeviceInfo admission so
  // the diagnostic path remains visible even if the host has no Intel primary.
@@ -142,15 +149,26 @@ void XeHost::processKernel(KernelPatcher &patcher) {
   const uint64_t bar2Length=bar2 ? bar2->getLength() : 0;
   vfObservation->setProperty("WhateverXeSRIOVVFBar2Length",bar2Length,64);
  }
- auto info=DeviceInfo::create();if(!info)return;
+ auto info=DeviceInfo::create();
+ root->setProperty("WhateverXeHostInfoCreated",info!=nullptr);
+ if(!info)return;
  auto gpu=OSDynamicCast(IOPCIDevice,info->videoBuiltin);
+ root->setProperty("WhateverXeHostInitialGPU",gpu!=nullptr);
  // Match WEG ordering: PCI config reads require a published IOPCIDevice.
  bool published=gpu && WIOKit::awaitPublishing(gpu);
+ root->setProperty("WhateverXeHostInitialPublished",published);
  if(published) {
   if(auto vf=xelpFindSRIOVVF()) {
+   root->setProperty("WhateverXeHostVFFound",true);
    vf->setProperty("WhateverXeSRIOVVFObserved",true);
    if(checkKernelArgument("-wex-sriov-vf")) {
-    info->videoBuiltin=vf;gpu=vf;published=WIOKit::awaitPublishing(gpu);
+    info->videoBuiltin=vf;gpu=vf;
+    // The S80 service was obtained from the published IOService plane.  A
+    // VF can still fail WIOKit's primary-GPU publication predicate because it
+    // is intentionally not Apple's native IGPU; the opt-in relay path admits
+    // that already-published service directly.
+    published=true;
+    root->setProperty("WhateverXeHostVFPublished",true);
    }
   }
  } else if(checkKernelArgument("-wex-sriov-vf")) {
@@ -158,11 +176,17 @@ void XeHost::processKernel(KernelPatcher &patcher) {
   // published S80 VF is still a valid logical A780 target for the opt-in
   // relay path, so admit it directly instead of abandoning the host setup.
   if(auto vf=xelpFindSRIOVVF()) {
+   root->setProperty("WhateverXeHostVFFound",true);
    vf->setProperty("WhateverXeSRIOVVFObserved",true);
-   info->videoBuiltin=vf;gpu=vf;published=WIOKit::awaitPublishing(gpu);
+   info->videoBuiltin=vf;gpu=vf;
+   // Registry enumeration has already proven that the VF is published.
+   // Do not require WEG's native-primary predicate for the experimental path.
+   published=true;
+   root->setProperty("WhateverXeHostVFPublished",true);
   }
  }
  const auto profile=published ? XELP::deviceProfile(gpu) : XELP::Profile {};
+ root->setProperty("WhateverXeHostProfileAdmitted",profile.displayAdmitted());
  // The host must dispatch framebuffer patches and accelerator rejection
  // hooks even when the selected profile deliberately has no Render backend.
  active=profile.displayAdmitted();
