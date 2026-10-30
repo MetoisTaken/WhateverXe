@@ -50,7 +50,7 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
   const auto serviceName=entry->getName();
   if(serviceName && serviceName[0]=='S')++registryPCI;
   char servicePath[256] {};
-  uint32_t servicePathLength=sizeof(servicePath);
+  int servicePathLength=sizeof(servicePath);
   const bool hasPath=entry->getPath(servicePath,&servicePathLength,gIOServicePlane)==kIOReturnSuccess;
   // Published PCI nodes carry pcidebug/vendor-id/device-id properties even
   // while their metaclass is not visible to a third-party kext's OSDynamicCast.
