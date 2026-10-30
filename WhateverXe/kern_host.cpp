@@ -24,12 +24,15 @@ static XeHost *xelpHost;
 static IOWorkLoop *xelpVFWorkLoop;
 static IOTimerEventSource *xelpVFAdmissionTimer;
 static void xelpRunDeferredVFAdmission(OSObject *, IOTimerEventSource *timer) {
+ auto root=IORegistryEntry::getRegistryRoot();
+ root->setProperty("WhateverXeVFAdmissionTimerFired",true);
  if(!xelpHost || !xelpKernelPatcher || !xelpPublishedVF || xelpVFAdmissionStarted) {
+  root->setProperty("WhateverXeVFAdmissionTimerWaiting",true);
   if(timer && (!xelpVFAdmissionStarted))timer->setTimeoutMS(50);
   return;
  }
  xelpVFAdmissionStarted=true;
- IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeHostDeferredAdmission",true);
+ root->setProperty("WhateverXeHostDeferredAdmission",true);
  xelpHost->processKernel(*xelpKernelPatcher);
 }
 static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
@@ -128,7 +131,11 @@ static bool xelpMarkSRIOVVFPublish(void *, void *, IOService *service, IONotifie
  xelpPublishedVF->retain();
  pci->setProperty("WhateverXeSRIOVVFCandidate",true);
  pci->setProperty("WhateverXeSRIOVVFObserved",true);
- if(xelpVFAdmissionTimer)xelpVFAdmissionTimer->setTimeoutMS(1);
+ if(xelpVFAdmissionTimer) {
+  root->setProperty("WhateverXeVFAdmissionTimerScheduled",true);
+  xelpVFAdmissionTimer->enable();
+  xelpVFAdmissionTimer->setTimeoutMS(1);
+ }
  return true;
 }
 void XeHost::init() {
