@@ -5,7 +5,8 @@ import subprocess,tempfile
 r=Path(__file__).resolve().parents[1]
 adapter=(r/'WhateverXe/kern_xelp_device.hpp').read_text();adapter=adapter[adapter.index('namespace XELP {'):adapter.rindex('#endif')]
 s=(r/'WhateverXe/kern_host.cpp').read_text();body=s[s.index('void XeHost::processKernel'):s.index('bool XeHost::wrapPanelSetDisplay')]
-helper=r'''static IOPCIDevice *xelpFindSRIOVVF() { return nullptr; }
+helper=r'''static IOPCIDevice *xelpFindSRIOVVFCandidate(bool) { return nullptr; }
+static IOPCIDevice *xelpFindSRIOVVF() { return nullptr; }
 '''
 code=r'''
 #include <cstdint>
@@ -24,6 +25,8 @@ struct OSData:Object {uint32_t value=0;void *getBytesNoCopy(){return &value;}siz
 OSData fake;Object customModel;bool hasModel=false;unsigned modelWrites=0;Object *deviceProperty=nullptr;
 struct IOPCIDevice {
  const char *name="GFX0";unsigned renames=0;
+ struct Memory {size_t getLength(){return 0;}};
+ Memory *getDeviceMemoryWithRegister(int){return nullptr;}
  uint32_t configRead32(int){assert(published);events.push_back(2);return identity;}
  uint8_t configRead8(int){assert(published);events.push_back(3);return revision;}
  uint16_t configRead16(int){assert(published);events.push_back(4);return 0x300;}

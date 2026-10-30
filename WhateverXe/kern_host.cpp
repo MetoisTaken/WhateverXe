@@ -18,7 +18,7 @@ static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",bac
 // DeviceInfo normally exposes only the primary IGPU. A passed-through VF can
 // remain a secondary PCI service beside QEMU's primary display, so the opt-in
 // diagnostic path must locate the VF before the host dispatches XE.
-static IOPCIDevice *xelpFindSRIOVVF() {
+static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  // Observe mode records a passed VF without selecting it as Apple's primary
  // display. This gives the future VF backend a bootable control experiment.
  if(!checkKernelArgument("-wex-sriov-vf") && !checkKernelArgument("-wex-sriov-vf-observe"))return nullptr;
@@ -35,11 +35,12 @@ static IOPCIDevice *xelpFindSRIOVVF() {
   if(identity!=0xA7808086U && identity!=0xA7801AF4U)continue;
   auto bar2=pci->getDeviceMemoryWithRegister(0x18);
   const auto bar2Length=bar2 ? bar2->getLength() : 0;
-  if(bar2Length>0 && bar2Length<0x40000000) {found=pci;break;}
+  if(!requireAperture || (bar2Length>0 && bar2Length<0x40000000)) {found=pci;break;}
  }
  iterator->release();
  return found;
 }
+static IOPCIDevice *xelpFindSRIOVVF() { return xelpFindSRIOVVFCandidate(true); }
 void XeHost::init() {
  callbackHost=this;
  PE_parse_boot_argn("gfxrst",&resetFramebuffer,sizeof(resetFramebuffer));
@@ -52,6 +53,16 @@ void XeHost::init() {
  XeDataAccess::init();
 }
 void XeHost::processKernel(KernelPatcher &patcher) {
+ // A passed-through VF is a secondary PCI service when QEMU's std VGA remains
+ // the primary display. Publish the observation before DeviceInfo admission so
+ // the diagnostic path remains visible even if the host has no Intel primary.
+ auto vfObservation=xelpFindSRIOVVFCandidate(false);
+ if(vfObservation) {
+  vfObservation->setProperty("WhateverXeSRIOVVFObserved",true);
+  const auto bar2=vfObservation->getDeviceMemoryWithRegister(0x18);
+  const uint64_t bar2Length=bar2 ? bar2->getLength() : 0;
+  vfObservation->setProperty("WhateverXeSRIOVVFBar2Length",bar2Length,64);
+ }
  auto info=DeviceInfo::create();if(!info)return;
  auto gpu=OSDynamicCast(IOPCIDevice,info->videoBuiltin);
  // Match WEG ordering: PCI config reads require a published IOPCIDevice.
