@@ -58,7 +58,8 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
   // 1af4:a780 is the QEMU generic identity used to keep Apple's native
   // Intel matcher away from the VF.  WhateverXe maps it back to the logical
   // A780 profile only on this explicit diagnostic path.
-  if(identity!=0xA7808086U && identity!=0xA7801AF4U)continue;
+  const bool qemuVFName=serviceName && !strncmp(serviceName,"S80@",4);
+  if(identity!=0xA7808086U && identity!=0xA7801AF4U && !qemuVFName)continue;
   ++matches;
   pci->setProperty("WhateverXeSRIOVVFCandidate",true);
   auto bar2=pci->getDeviceMemoryWithRegister(0x18);

@@ -7,6 +7,8 @@
 namespace XELP {
 inline Profile deviceProfile(IOPCIDevice *pci) {
     if(!pci)return {};
+    if(pci->getProperty("WhateverXeSRIOVVFCandidate"))
+        return identify(0xA7808086U,pci->configRead8(8),0xA7808086U);
     // QEMU can intentionally mask a passed VF's Intel identity so Apple's
     // native Intel driver does not bind to a VF with no PF-style BAR0.  The
     // experimental VF profile still uses the logical A780 platform data while
