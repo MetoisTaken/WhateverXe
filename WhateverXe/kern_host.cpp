@@ -41,17 +41,13 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  const bool requested=checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe");
  IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFScanRequested",requested);
  if(!requested)return nullptr;
- auto matching=IOService::serviceMatching("IOPCIDevice");
- auto iterator=matching ? IOService::getMatchingServices(matching) : nullptr;
- if(matching)matching->release();
+ auto iterator=IORegistryIterator::iterateOver(gIOServicePlane,kIORegistryIterateRecursively);
  if(!iterator)return nullptr;
  IOPCIDevice *found=nullptr;
  uint32_t scanned=0,matches=0;
  while(auto entry=iterator->getNextObject()) {
   ++scanned;
-  // The matching dictionary is constrained to IOPCIDevice, so avoid relying
-  // on a cross-kext metaclass cast while the PCI family is still publishing.
-  auto pci=static_cast<IOPCIDevice *>(entry);
+  auto pci=static_cast<IOPCIDevice *>(entry->metaCast("IOPCIDevice"));
   if(!pci)continue;
   const auto identity=xelpPCIIdentity(pci);
   // 1af4:a780 is the QEMU generic identity used to keep Apple's native
