@@ -15,6 +15,7 @@ static const char *graphicsPath[] { "/System/Library/Extensions/IOGraphicsFamily
 static KernelPatcher::KextInfo graphics { "com.apple.iokit.IOGraphicsFamily",graphicsPath,arrsize(graphicsPath),{true},{},KernelPatcher::KextInfo::Unloaded };
 static const char *backlightPath[] { "/System/Library/Extensions/AppleBacklight.kext/Contents/MacOS/AppleBacklight" };
 static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",backlightPath,arrsize(backlightPath),{true},{},KernelPatcher::KextInfo::Unloaded };
+static IOPCIDevice *xelpPublishedVF;
 static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
  if(!pci)return 0;
  const auto raw=pci->configRead32(0);
@@ -41,6 +42,15 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  const bool requested=checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe");
  IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFScanRequested",requested);
  if(!requested)return nullptr;
+ if(xelpPublishedVF) {
+  auto bar2=xelpPublishedVF->getDeviceMemoryWithRegister(0x18);
+  const auto bar2Length=bar2 ? bar2->getLength() : 0;
+  if(!requireAperture || (bar2Length>0 && bar2Length<0x40000000)) {
+   IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFMatchCount",1U,32);
+   xelpPublishedVF->setProperty("WhateverXeSRIOVVFCandidate",true);
+   return xelpPublishedVF;
+  }
+ }
  auto iterator=IORegistryIterator::iterateOver(gIOServicePlane,kIORegistryIterateRecursively);
  if(!iterator)return nullptr;
  IOPCIDevice *found=nullptr;
@@ -97,6 +107,9 @@ static bool xelpMarkSRIOVVFPublish(void *, void *, IOService *service, IONotifie
  root->setProperty("WhateverXeVFNameSeen",true);
  root->setProperty("WhateverXeSRIOVVFMatchCount",1U,32);
  auto pci=static_cast<IOPCIDevice *>(service);
+ if(xelpPublishedVF)xelpPublishedVF->release();
+ xelpPublishedVF=pci;
+ xelpPublishedVF->retain();
  pci->setProperty("WhateverXeSRIOVVFCandidate",true);
  pci->setProperty("WhateverXeSRIOVVFObserved",true);
  return true;
