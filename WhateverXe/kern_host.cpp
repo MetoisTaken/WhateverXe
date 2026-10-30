@@ -60,7 +60,8 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
   // A780 profile only on this explicit diagnostic path.
   if(serviceName && serviceName[0]=='S')
    IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeLastPCIService",serviceName);
-  const bool qemuVFName=serviceName && !strncmp(serviceName,"S80",3);
+  const bool qemuVFName=serviceName && serviceName[0]=='S' && serviceName[1]=='8' && serviceName[2]=='0';
+  if(qemuVFName)IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeVFNameSeen",true);
   if(identity!=0xA7808086U && identity!=0xA7801AF4U && !qemuVFName)continue;
   ++matches;
   pci->setProperty("WhateverXeSRIOVVFCandidate",true);
