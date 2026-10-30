@@ -12,6 +12,8 @@ inline Profile deviceProfile(IOPCIDevice *pci) {
     // experimental VF profile still uses the logical A780 platform data while
     // the PCI function remains owned by the relay backend.
     auto identity=pci->configRead32(0);
+    const auto words=(static_cast<uint32_t>(pci->configRead16(2))<<16) | pci->configRead16(0);
+    if(words==0xA7801AF4U || words==0xA7808086U)identity=words;
     if(identity!=0xA7801AF4U && identity!=0xA7808086U &&
        ((identity&0xFFFFU)==0x1AF4U || (identity>>16)==0x1AF4U))
         identity=(static_cast<uint32_t>(pci->configRead16(2))<<16) | pci->configRead16(0);

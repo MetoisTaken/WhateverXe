@@ -239,6 +239,8 @@ static bool xelpDisplay13Device(IOPCIDevice *pci) {
 static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
     if(!pci)return 0;
     const auto raw=pci->configRead32(0);
+    const auto words=(static_cast<uint32_t>(pci->configRead16(2))<<16) | pci->configRead16(0);
+    if(words==0xA7808086U || words==0xA7801AF4U)return words;
     if(raw==0xA7808086U || raw==0xA7801AF4U)return raw;
     if((raw&0xFFFFU)!=0x1AF4U && (raw>>16)!=0x1AF4U)return raw;
     return (static_cast<uint32_t>(pci->configRead16(2))<<16) | pci->configRead16(0);
