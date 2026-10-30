@@ -16,6 +16,7 @@ static KernelPatcher::KextInfo graphics { "com.apple.iokit.IOGraphicsFamily",gra
 static const char *backlightPath[] { "/System/Library/Extensions/AppleBacklight.kext/Contents/MacOS/AppleBacklight" };
 static KernelPatcher::KextInfo backlight { "com.apple.driver.AppleBacklight",backlightPath,arrsize(backlightPath),{true},{},KernelPatcher::KextInfo::Unloaded };
 static IOPCIDevice *xelpPublishedVF;
+static bool xelpVFAdmissionAttempted;
 static uint32_t xelpPCIIdentity(IOPCIDevice *pci) {
  if(!pci)return 0;
  const auto raw=pci->configRead32(0);
@@ -116,6 +117,7 @@ static bool xelpMarkSRIOVVFPublish(void *, void *, IOService *service, IONotifie
 }
 void XeHost::init() {
  callbackHost=this;
+ xelpVFAdmissionAttempted=false;
  if(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")) {
   if(auto matching=IOService::serviceMatching("IOPCIDevice")) {
    IOService::addMatchingNotification(gIOFirstPublishNotification,matching,xelpMarkSRIOVVFPublish,nullptr,nullptr,0);
@@ -238,6 +240,15 @@ void XeHost::processKext(KernelPatcher &patcher,size_t index,mach_vm_address_t a
    const auto bar2=vf->getDeviceMemoryWithRegister(0x18);
    const uint64_t bar2Length=bar2 ? bar2->getLength() : 0;
    vf->setProperty("WhateverXeSRIOVVFBar2Length",bar2Length,64);
+   if(checkKernelArgument("-wex-sriov-vf") && !xelpVFAdmissionAttempted) {
+    // The VF may be published after Lilu's kernel-patcher callback has
+    // already run.  Re-enter the same admission path once from the first
+    // kext notification that sees the published S80 service; this keeps the
+    // registry callback read-only and avoids a detached worker thread.
+    xelpVFAdmissionAttempted=true;
+    IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeHostDeferredAdmission",true);
+    processKernel(patcher);
+   }
   }
  }
  if(!active)return;
