@@ -23,6 +23,21 @@ static bool xelpVFAdmissionStarted;
 static XeHost *xelpHost;
 static IOWorkLoop *xelpVFWorkLoop;
 static IOTimerEventSource *xelpVFAdmissionTimer;
+static void xelpRunDeferredVFAdmission(OSObject *, IOTimerEventSource *);
+static bool xelpEnsureVFAdmissionTimer() {
+ if(xelpVFAdmissionTimer)return true;
+ xelpVFWorkLoop=IOWorkLoop::workLoop();
+ if(!xelpVFWorkLoop)return false;
+ xelpVFAdmissionTimer=IOTimerEventSource::timerEventSource(nullptr,xelpRunDeferredVFAdmission);
+ if(!xelpVFAdmissionTimer || xelpVFWorkLoop->addEventSource(xelpVFAdmissionTimer)!=kIOReturnSuccess) {
+  if(xelpVFAdmissionTimer)xelpVFAdmissionTimer->release();
+  xelpVFAdmissionTimer=nullptr;
+  xelpVFWorkLoop->release();
+  xelpVFWorkLoop=nullptr;
+  return false;
+ }
+ return true;
+}
 static void xelpRunDeferredVFAdmission(OSObject *, IOTimerEventSource *timer) {
  auto root=IORegistryEntry::getRegistryRoot();
  root->setProperty("WhateverXeVFAdmissionTimerFired",true);
@@ -131,7 +146,7 @@ static bool xelpMarkSRIOVVFPublish(void *, void *, IOService *service, IONotifie
  xelpPublishedVF->retain();
  pci->setProperty("WhateverXeSRIOVVFCandidate",true);
  pci->setProperty("WhateverXeSRIOVVFObserved",true);
- if(xelpVFAdmissionTimer) {
+ if(xelpEnsureVFAdmissionTimer()) {
   root->setProperty("WhateverXeVFAdmissionTimerScheduled",true);
   xelpVFAdmissionTimer->enable();
   xelpVFAdmissionTimer->setTimeoutMS(1);
@@ -143,16 +158,7 @@ void XeHost::init() {
  xelpHost=this;
  xelpKernelPatcher=nullptr;
  xelpVFAdmissionStarted=false;
- xelpVFWorkLoop=IOWorkLoop::workLoop();
- if(xelpVFWorkLoop) {
-  xelpVFAdmissionTimer=IOTimerEventSource::timerEventSource(nullptr,xelpRunDeferredVFAdmission);
-  if(!xelpVFAdmissionTimer || xelpVFWorkLoop->addEventSource(xelpVFAdmissionTimer)!=kIOReturnSuccess) {
-   if(xelpVFAdmissionTimer)xelpVFAdmissionTimer->release();
-   xelpVFAdmissionTimer=nullptr;
-   xelpVFWorkLoop->release();
-   xelpVFWorkLoop=nullptr;
-  }
- }
+ IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeVFAdmissionTimerReady",xelpEnsureVFAdmissionTimer());
  if(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")) {
   if(auto matching=IOService::serviceMatching("IOPCIDevice")) {
    IOService::addMatchingNotification(gIOFirstPublishNotification,matching,xelpMarkSRIOVVFPublish,nullptr,nullptr,0);
