@@ -84,24 +84,8 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  return found;
 }
 static IOPCIDevice *xelpFindSRIOVVF() { return xelpFindSRIOVVFCandidate(true); }
-static bool xelpObserveSRIOVVFPublish(void *, void *, IOService *, IONotifier *) {
- if(!(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")))return true;
- if(auto vf=xelpFindSRIOVVFCandidate(false)) {
-  vf->setProperty("WhateverXeSRIOVVFObserved",true);
-  const auto bar2=vf->getDeviceMemoryWithRegister(0x18);
-  const uint64_t bar2Length=bar2 ? bar2->getLength() : 0;
-  vf->setProperty("WhateverXeSRIOVVFBar2Length",bar2Length,64);
- }
- return true;
-}
 void XeHost::init() {
  callbackHost=this;
- if(checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe")) {
-  if(auto matching=IOService::serviceMatching("IOPCIDevice")) {
-   IOService::addMatchingNotification(gIOFirstPublishNotification,matching,xelpObserveSRIOVVFPublish,nullptr,nullptr,0);
-   matching->release();
-  }
- }
  PE_parse_boot_argn("gfxrst",&resetFramebuffer,sizeof(resetFramebuffer));
  if(resetFramebuffer>=FB_TOTAL)resetFramebuffer=FB_DETECT;
  lilu.onPatcherLoadForce([](void *u,KernelPatcher &p){static_cast<XeHost *>(u)->processKernel(p);},this);
