@@ -41,7 +41,9 @@ static IOPCIDevice *xelpFindSRIOVVFCandidate(bool requireAperture) {
  const bool requested=checkKernelArgument("-wex-sriov-vf") || checkKernelArgument("-wex-sriov-vf-observe");
  IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeSRIOVVFScanRequested",requested);
  if(!requested)return nullptr;
- auto iterator=IORegistryIterator::iterateOver(gIOServicePlane,kIORegistryIterateRecursively);
+ auto matching=IOService::serviceMatching("IOPCIDevice");
+ auto iterator=matching ? IOService::getMatchingServices(matching) : nullptr;
+ if(matching)matching->release();
  if(!iterator)return nullptr;
  IOPCIDevice *found=nullptr;
  uint32_t scanned=0,matches=0;
