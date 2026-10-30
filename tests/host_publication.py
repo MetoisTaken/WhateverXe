@@ -27,7 +27,7 @@ struct IOPCIDevice {
  uint8_t configRead8(int){assert(published);events.push_back(3);return revision;}
  uint16_t configRead16(int){assert(published);events.push_back(4);return 0x300;}
  const char *getName(){return name;}Object *getProperty(const char *key){return !strcmp(key,"device-id")?deviceProperty:!strcmp(key,"model")&&hasModel?&customModel:nullptr;}
- void setProperty(const char *,const char *){}void setProperty(const char *key,const void *value,unsigned size){if(!strcmp(key,"model")){assert(value && size>1);++modelWrites;}}void setProperty(const char *,uint64_t,unsigned){}
+ void setProperty(const char *,bool){}void setProperty(const char *,const char *){}void setProperty(const char *key,const void *value,unsigned size){if(!strcmp(key,"model")){assert(value && size>1);++modelWrites;}}void setProperty(const char *,uint64_t,unsigned){}
 };
 #define OSDynamicCast(type,p) dynamic_cast<type *>(p)
 struct DeviceInfo {
