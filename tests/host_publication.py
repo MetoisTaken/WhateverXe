@@ -19,7 +19,7 @@ code=r'''
 #include <vector>
 #include "kern_xelp_platform.hpp"
 using mach_vm_address_t=uintptr_t;
-struct IORegistryEntry {static IORegistryEntry *getRegistryRoot(){static IORegistryEntry r;return &r;}void setProperty(const char*,bool){}};
+struct IORegistryEntry {static IORegistryEntry *getRegistryRoot(){static IORegistryEntry r;return &r;}void setProperty(const char*,bool){}void setProperty(const char*,unsigned,unsigned){}};
 std::vector<int> events;bool publish=true,published=false;uint32_t identity=0x9a498086;uint8_t revision=0;
 bool checkKernelArgument(const char *){return false;}
 void IOSleep(unsigned){}
