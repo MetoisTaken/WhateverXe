@@ -54,6 +54,8 @@ fixture = r'''
 #include <initializer_list>
 #include "kern_xelp_platform.hpp"
 #include "kern_xelp_os.hpp"
+#include "kern_rpls_memory.hpp"
+static bool rplsMemoryAdmitted,rplsMemoryRequested;
 static const char *qualified = "Darwin Kernel Version 20.6.0: Thu Jul  6 22:12:47 PDT 2023; root:xnu-7195.141.49.702.12~1/RELEASE_X86_64";
 static const char *version = qualified;
 static std::set<std::string> args;
