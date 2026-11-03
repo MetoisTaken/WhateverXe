@@ -13862,6 +13862,14 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
                     wrapADLSFBMemInit,orgADLSFBMemInit,true);
                 IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSStolenGGTTReady",routed);
             }
+            if(adlsDisplaySelected && !checkKernelArgument("-wex-hdmi-hdcp")) {
+                // This donor's HDCP1/2 transports are DPCD/AUX only. On a fixed
+                // HDMI combo route each attempt fails and drops the link.
+                static const uint8_t entry[]={0x55,0x48,0x89,0xE5,0x41,0x56,0x53,0x48,0xFF,0x05};
+                const bool routed=adlsDonorRoute(patcher,index,address,size,"__ZN21AppleIntelDisplayPath8initHDCPEv",
+                    0x91D9A,entry,sizeof(entry),wrapADLSInitHDCP,orgADLSInitHDCP,true);
+                IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMIHDCPGateReady",routed);
+            }
 			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN17AppleIntelPortHAL14enableComboPhyEv", wrapTGLEnableCombo, orgTGLEnableCombo},
@@ -20428,6 +20436,23 @@ void XE::wrapADLSEnableClocks(void *controller,void *port,void *otherPort,uint32
     FunctionCast(wrapADLSEnableClocks,callbackXE->orgComboEnableClocks)(controller,port,otherPort,params);
     comboEndClock();
     tglTransitionRecord(71,true,port,encoded.cfg0,encoded.cfg1,0);
+}
+
+// Native initHDCP already leaves no HDCP object for a type-0 port; callers
+// handle that null. Do the same for bound fixed HDMI combo routes only.
+void XE::wrapADLSInitHDCP(void *path) {
+    auto p=static_cast<uint8_t *>(path);
+    auto port=p ? *reinterpret_cast<uint8_t **>(p+0x3648) : nullptr;
+    auto config=port ? *reinterpret_cast<uint32_t **>(port+0x548) : nullptr;
+    auto self=callbackXE;
+    if(config && !*reinterpret_cast<void **>(p+0x32B8) && self->adlsDisplaySelected &&
+       self->adlsWiring.matches(config,false) && self->adlsWiring.bound(self->tglPlatformCopy,config)) {
+        static uint32_t skipped {};
+        uint32_t record[]={config[0],__atomic_add_fetch(&skipped,1,__ATOMIC_RELAXED)};
+        IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMIHDCPSkipped",record,sizeof(record));
+        return;
+    }
+    FunctionCast(wrapADLSInitHDCP,self->orgADLSInitHDCP)(path);
 }
 
 // Without an Intel GOP nothing maps GGTT[0..] onto the stolen memory;

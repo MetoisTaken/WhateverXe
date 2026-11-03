@@ -153,6 +153,8 @@ private:
     static int wrapADLSSetupBootDisplay(void *controller);
     mach_vm_address_t orgADLSFBMemInit {};
     static void wrapADLSFBMemInit(void *controller);
+    mach_vm_address_t orgADLSInitHDCP {};
+    static void wrapADLSInitHDCP(void *path);
     XELP::SmallGTResources display12SmallGT;
     XELP::Profile xeProfile;
     XELP::VBT::Ports firmwarePorts;
