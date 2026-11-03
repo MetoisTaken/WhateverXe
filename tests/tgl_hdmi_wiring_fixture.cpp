@@ -23,13 +23,15 @@ struct IORegistryEntry {
 #define OSDynamicCast(t,p) dynamic_cast<t*>(p)
 #define FunctionCast(f,p) reinterpret_cast<decltype(&f)>(p)
 #define arrsize(a) (sizeof(a)/sizeof(a[0]))
+static bool rplsPlainContextProfile;
 uintptr_t testCaller=0x100;
 #define __builtin_return_address(n) reinterpret_cast<void *>(testCaller)
 void clock_get_uptime(uint64_t *p){*p=0;}void absolutetime_to_nanoseconds(uint64_t t,uint64_t *p){*p=t;}
 void *current_thread(){return reinterpret_cast<void *>(1);}
 struct XE {
+ void *tglObservationController {};
  bool tglHDMIB=true,tglStolenMemoryReady=false;
- uint32_t tglComboDPMask=0;bool adlsDisplaySelected=false;
+ uint32_t tglComboDPMask=0;bool adlsDisplaySelected=false,adlsClockReady=false;
  struct {uint32_t fStolenMemorySize=0;} framebufferPatch;
  XELP::VBT::Ports firmwarePorts;
  // FIELDS

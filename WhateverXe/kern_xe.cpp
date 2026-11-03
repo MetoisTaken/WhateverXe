@@ -3492,12 +3492,23 @@ struct TGLGMBusObservation {
 	uint64_t history[128];
 };
 TGLGMBusObservation tglGMBusObservations[8] {};
+// CPU-only visibility before the existing ADL-S request guard. No additional
+// register reads, request rewriting or native pin-bound changes are made here.
+static bool rplsDDCObserveReady;
+static uint32_t rplsDDCRoutes;
+static uint64_t rplsDDCReceipt[32] {1};
 struct TGLMEIRecord {
 	uint64_t ns, thread;
 	uint32_t word[18];
 	uint8_t payload[40];
 };
 static_assert(sizeof(TGLMEIRecord) == 128, "MEI observation schema");
+static bool rplsDDCSerialize(void *,void *,OSSerialize *serializer) {
+ uint64_t out[32] {1,rplsPlainContextProfile,rplsDDCObserveReady,rplsDDCRoutes};
+ for(unsigned i=4;i<32;++i)out[i]=__atomic_load_n(rplsDDCReceipt+i,__ATOMIC_RELAXED);
+ auto data=OSData::withBytes(out,sizeof(out));if(!data)return false;
+ const bool ok=data->serialize(serializer);data->release();return ok;
+}
 IOSimpleLock *tglMEILock;
 TGLMEIRecord tglMEIFirst[512] {}, tglMEILast[128] {};
 uint32_t tglMEICount {}, tglMEIFilterCount {};
@@ -13591,6 +13602,14 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 				const bool routed = patcher.routeMultiple(index, &observe, 1, address, size);
 				IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGRouteGMBus", routed);
 				patcher.clearError();
+				if(rplsPlainContextProfile) {
+					rplsDDCRoutes=(routed?1U:0U)|(readRouted?2U:0U);
+					rplsDDCObserveReady=routed && readRouted;
+					auto root=IORegistryEntry::getRegistryRoot();root->setProperty("WEXRPLSDDCObserveReady",rplsDDCObserveReady);
+					if(auto live=OSSerializer::forTarget(nullptr,rplsDDCSerialize)) {
+						root->setProperty("WEXRPLSDDC",live);live->release();
+					}
+				}
 			}
 
             processNativePanel(patcher,index,address,size);
@@ -18669,6 +18688,12 @@ uint32_t XE::wrapTGLMEIWrite(void *driver, void *buffer, uint32_t *length, uint8
 // 13/14 FB get/set attribute, 15 FB newUserClient, 16 AGDC AUX,
 // 17 port status, 18/19/20 training begin/config/end. Bounded event history.
 void XE::tglTrace(uint32_t stage, uint32_t id, bool done, uint32_t a, uint32_t b, uint32_t result, uint64_t value) {
+ if(rplsPlainContextProfile && stage<2) {
+  auto q=rplsDDCReceipt+24+4*stage;
+  __atomic_fetch_add(q+(done?1:0),1ULL,__ATOMIC_RELAXED);
+  __atomic_store_n(q+2,(uint64_t(id)<<32)|a,__ATOMIC_RELAXED);
+  if(done)__atomic_store_n(q+3,uint64_t(result),__ATOMIC_RELAXED);
+ }
 	if (tglQuietTraining()) return;
 	tglTimeEvent(stage, id, done, a, result);
 	static uint32_t counts[22][10] {};
@@ -18814,8 +18839,28 @@ uint32_t XE::wrapTGLRegisterRead(void *access, unsigned long reg) {
 }
 
 uint32_t XE::wrapTGLGMBus(void *controller, uint32_t bus, uint32_t speed, void *request) {
+ const bool exact=rplsPlainContextProfile;
+ auto set=[&](unsigned i,uint64_t v){if(exact)__atomic_store_n(rplsDDCReceipt+i,v,__ATOMIC_RELAXED);};
+ if(exact) {
+  const auto call=__atomic_add_fetch(rplsDDCReceipt+4,1ULL,__ATOMIC_RELAXED);
+  uint32_t pins=0;for(unsigned d=0;d<XELP::PortCount;++d)
+   if((callbackXE->adlsWiring.hdmi&(1U<<d)) && callbackXE->adlsWiring.pin[d]<32)pins|=1U<<callbackXE->adlsWiring.pin[d];
+  set(7,1);set(8,bus);set(9,speed);set(10,reinterpret_cast<uintptr_t>(controller));
+  set(11,reinterpret_cast<uintptr_t>(callbackXE->tglObservationController));
+  set(12,reinterpret_cast<uintptr_t>(__builtin_return_address(0)));set(13,reinterpret_cast<uintptr_t>(request));
+  set(14,callbackXE->tglHDMIWiringApplied);set(15,callbackXE->adlsWiring.valid);set(16,callbackXE->adlsWiring.hdmi);
+  set(17,pins);set(18,callbackXE->tglHDMIDDCEligible(bus));set(19,controller==callbackXE->tglObservationController);
+  set(22,callbackXE->adlsClockReady);if(call==1)set(23,bus);
+ }
+ auto finish=[&](bool native,uint32_t result) {
+  if(!exact)return;
+  __atomic_fetch_add(rplsDDCReceipt+(native?6:5),1ULL,__ATOMIC_RELAXED);
+  set(7,native?4:2);set(20,result);
+  set(21,request?*reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(request)+0x1C):0);
+ };
  if(callbackXE->adlsDisplaySelected && !callbackXE->tglHDMIDDCEligible(bus)) {
   if(request)*reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(request)+0x1C)=0xE00002C2;
+  finish(false,0xE00002C2);
   return 0xE00002C2;
  }
 	uint64_t r[24] {}, uptime;
@@ -18851,7 +18896,9 @@ uint32_t XE::wrapTGLGMBus(void *controller, uint32_t bus, uint32_t speed, void *
 		observation = &slot;
 		break;
 	}
+	set(7,3);
 	const auto result = FunctionCast(wrapTGLGMBus, callbackXE->orgTGLGMBus)(controller, bus, speed, request);
+	finish(true,result);
 	if (observation) {
 		r[19] = observation->reads; r[20] = observation->first; r[21] = observation->last;
 		r[22] = observation->combined; r[23] = observation->firstError;
