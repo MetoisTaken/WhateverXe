@@ -20521,6 +20521,34 @@ static bool adlsLiveSerialize(void *,void *,OSSerialize *serializer) {
     const bool ok=data->serialize(serializer);data->release();return ok;
 }
 
+// Read-only scanout description: pipe A plane 1 registers plus the GGTT
+// entries backing its surface, so debugging tools can reconstruct the frame.
+static volatile uint8_t *adlsLiveGSM;
+static bool adlsScanoutSerialize(void *,void *,OSSerialize *serializer) {
+    auto read=__atomic_load_n(&adlsLiveRead,__ATOMIC_ACQUIRE);
+    auto access=__atomic_load_n(&adlsLiveAccess,__ATOMIC_ACQUIRE);
+    auto gsm=__atomic_load_n(&adlsLiveGSM,__ATOMIC_ACQUIRE);
+    uint32_t head[8] {1};
+    if(access && read) {
+        const uint32_t regs[]={0x70180,0x7019C,0x70188,0x70190,0x701A4,0x7018C};
+        for(unsigned i=0;i<6;++i)head[1+i]=read(access,regs[i]);
+    }
+    // Generous bound: 4096 PTEs per 16 MiB; cap at 64 MiB of surface.
+    const uint32_t surf=head[2]&~0xFFFU,maxPages=16384;
+    const uint32_t h=((head[4]>>16)&0xFFFF)+1,stride=(head[3]&0x7FF)*512;
+    uint32_t pages=gsm && head[1] ? (stride*h+4095)/4096 : 0;if(pages>maxPages)pages=maxPages;
+    head[7]=pages;
+    const size_t bytes=sizeof(head)+size_t(pages)*8;
+    auto out=static_cast<uint8_t *>(IOMalloc(bytes));if(!out)return false;
+    memcpy(out,head,sizeof(head));
+    for(uint32_t i=0;i<pages;++i) {
+        auto p=reinterpret_cast<volatile uint32_t *>(gsm+8*((surf>>12)+i));
+        const uint64_t v=(uint64_t(p[1])<<32)|p[0];memcpy(out+sizeof(head)+8*i,&v,8);
+    }
+    auto data=OSData::withBytes(out,static_cast<unsigned>(bytes));IOFree(out,bytes);if(!data)return false;
+    const bool ok=data->serialize(serializer);data->release();return ok;
+}
+
 // Without an Intel GOP nothing maps GGTT[0..] onto the stolen memory;
 // stale entries then feed scanout and the native recycled-RAM export. Write
 // the linear firmware mapping (gen8+ GGTT encoding) for the usable range
@@ -20533,6 +20561,10 @@ void XE::wrapADLSFBMemInit(void *controller) {
         __atomic_store_n(&adlsLiveAccess,*reinterpret_cast<void **>(c+0xC40),__ATOMIC_RELEASE);
         if(auto live=OSSerializer::forTarget(nullptr,adlsLiveSerialize)) {
             IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSDisplayLive",live);live->release();
+        }
+        __atomic_store_n(&adlsLiveGSM,*reinterpret_cast<volatile uint8_t **>(c+0xCA0),__ATOMIC_RELEASE);
+        if(auto scan=OSSerializer::forTarget(nullptr,adlsScanoutSerialize)) {
+            IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSScanout",scan);scan->release();
         }
     }
     uint64_t r[16] {1};
