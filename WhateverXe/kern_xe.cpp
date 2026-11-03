@@ -13100,10 +13100,23 @@ bool XE::wrapFramebufferStart(IOService *that,IOService *provider) {
    return false;
   }
  }
+ // The native start publishes IntelFBClientControl after its FB children.
+ // Make the qualified ADL-S parent eligible for the real graphics-policy
+ // driver before that publication. This does not admit a framebuffer open:
+ // native start and real AGDC receiver registration are still required.
+ const bool adlsPolicy=s->adlsDisplaySelected && !s->display13FramebufferRequested && s->adlsDisplayHooksReady;
+ if(adlsPolicy)that->setProperty("WEXADLSGraphicsPolicyReady",true);
  const bool native=s->display13FramebufferRequested ? wrapDisplay13FramebufferStart(that,provider) : wrapTGLFramebufferStart(that,provider);
  IORecursiveLockLock(s->tglPathPoolLock);
  const bool accepted=native && !s->tglLeasesStopping;
  __atomic_store_n(&s->framebufferStartedController,accepted?static_cast<void *>(that):nullptr,__ATOMIC_RELEASE);
+ if(adlsPolicy && !accepted) {
+  // Keep this start reserved until its matching eligibility is withdrawn.
+  // Property matching must not run under the native pool lock.
+  IORecursiveLockUnlock(s->tglPathPoolLock);
+  that->setProperty("WEXADLSGraphicsPolicyReady",false);
+  IORecursiveLockLock(s->tglPathPoolLock);
+ }
  s->framebufferStartInProgress=false;
  IORecursiveLockUnlock(s->tglPathPoolLock);
  return accepted;

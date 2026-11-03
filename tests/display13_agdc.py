@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Production client admission and optional exact native AGDC dispatch replay."""
 from pathlib import Path
-import hashlib,re,subprocess,sys,tempfile
+import hashlib,re,subprocess,sys,tempfile,plistlib
 r=Path(__file__).resolve().parents[1];s=(r/'WhateverXe/kern_xe.cpp').read_text()
-names=['processFramebufferAGDC','wrapFramebufferUserClient','wrapFramebufferAGDCCallback']
+names=['processFramebufferAGDC','wrapFramebufferUserClient','wrapFramebufferAGDCCallback','wrapFramebufferStart','wrapTGLAGDCRegister']
 functions='\n'.join(re.search(r'(?:bool|uint32_t) XE::'+n+r'\(.*?\n\}',s,re.S).group() for n in names)
 arrays={n:re.search(n+r'\[\]=\{([^}]+)',functions).group(1) for n in ['clientEntry','callbackEntry','dispatch']}
 assert s.count('processFramebufferAGDC(patcher,index,address,size)')==1
+policy=plistlib.loads((r/'AppleIntelTGLCompat/GraphicsPolicy.plist').read_bytes())['WEX ADL-S graphics policy']
+assert policy['IOProviderClass']==policy['IONameMatch']=='IntelFBClientControl'
+assert policy['IOParentMatch']=={'IOProviderClass':'AppleIntelFramebufferController','IOPropertyMatch':{'WEXADLSGraphicsPolicyReady':True}}
 if len(sys.argv)>1:
  b=Path(sys.argv[1]).read_bytes()
  assert hashlib.sha256(b).hexdigest() in ['c004fc1ac9ee4157e2e12736f40fa6639bde025a279326beeb9dd48c9b445731','8f83afbe21f216ed18ea798c10d91b7b4fd990b62a5740832c1f90137722c32f']
@@ -21,13 +24,21 @@ code=r'''
 #include <fstream>
 #include <iterator>
 #include <vector>
+#include <map>
+#include <string>
 #include <sys/mman.h>
+#include "kern_xelp_combo_clock.hpp"
+struct {void *lock=(void*)1;XELPComboClock::ClockAllocation allocation;}comboClockTransaction;
+unsigned lockDepth=0;
+void IORecursiveLockLock(void*){++lockDepth;}void IORecursiveLockUnlock(void*){assert(lockDepth);--lockDepth;}
 using mach_vm_address_t=uintptr_t;
 constexpr uint32_t kIOReturnNotReady=0xe00002d8;
 #define FunctionCast(fn,addr) reinterpret_cast<decltype(&fn)>(addr)
 #define arrsize(a) (sizeof(a)/sizeof(a[0]))
 struct Meta {unsigned size=0x4b90;unsigned getClassSize(){return size;}};
-struct IOService {alignas(16) uint8_t bytes[0x4b90]{};Meta meta;Meta *getMetaClass(){return &meta;}};
+struct IOService {alignas(16) uint8_t bytes[0x4b90]{};Meta meta;std::map<std::string,bool>properties;Meta *getMetaClass(){return &meta;}
+ void setProperty(const char *key,bool value){assert(!lockDepth);properties[key]=value;}};
+bool policyEligible(IOService *c){const auto i=c->properties.find("WEXADLSGraphicsPolicyReady");return i!=c->properties.end() && i->second;}
 namespace Display13FBMemory {template<class T> T field(void *p,unsigned n){T v;memcpy(&v,(uint8_t*)p+n,sizeof(v));return v;}}
 template<class T> void put(void *p,unsigned n,T v){memcpy((uint8_t*)p+n,&v,sizeof(v));}
 struct IORegistryEntry {
@@ -43,19 +54,26 @@ struct KernelPatcher {
 };
 struct XE {
  static XE *callbackXE;bool display13FramebufferRequested=true,display13FBABIReady=true;
+ bool adlsDisplaySelected=false,adlsDisplayHooksReady=true,framebufferDonorCommonReady=true,framebufferBackendInstalled=true;
+ bool framebufferStartInProgress=false,tglLeasesStopping=false;void *tglPathPoolLock=(void*)1;
  IOService *adlnTopologyController=nullptr,*tglObservationController=nullptr;
  uint32_t framebufferProtocolCalls=0;void *framebufferStartedController=nullptr;
- uintptr_t orgFramebufferUserClient=0,orgFramebufferAGDCCallback=0;
+ uintptr_t orgFramebufferUserClient=0,orgFramebufferAGDCCallback=0,orgTGLAGDCRegister=0;
  bool processFramebufferAGDC(KernelPatcher &,size_t,uintptr_t,size_t);
  bool processDisplay13TrialAGDC(KernelPatcher &,size_t,uintptr_t,size_t){return true;}
  static uint32_t wrapFramebufferUserClient(IOService *,void *,void *,uint32_t,void **);
  static uint32_t wrapFramebufferAGDCCallback(IOService *,uint32_t,unsigned long,uint32_t);
+ static bool wrapFramebufferStart(IOService*,IOService*);
+ static bool wrapTGLFramebufferStart(IOService*,IOService*);
+ static bool wrapDisplay13FramebufferStart(IOService*,IOService*){assert(false);return false;}
+ static uint32_t wrapTGLAGDCRegister(void*,void*);
  static void observeFramebufferUserClient(IOService*,uint32_t,void**,uint32_t){};
  static void tglTrace(unsigned,unsigned,bool,unsigned,unsigned,unsigned,unsigned long){};
 };
 XE *XE::callbackXE;
 FUNCTIONS
 IOService fb,controller,other;unsigned clientCalls=0,callbackCalls=0;
+unsigned nativeStartCalls=0,registrations=0;
 uintptr_t expectedArgument=0;uint32_t expectedEvent=0,expectedValue=0,result=0xe00002bc;
 uint32_t receiver(void *context,uintptr_t arg,uint32_t value,uint32_t event){
  assert(!context&&arg==expectedArgument&&value==expectedValue&&event==expectedEvent);++callbackCalls;return result;
@@ -69,6 +87,18 @@ uint32_t originalCallback(IOService *c,uint32_t e,unsigned long a,uint32_t v){
  auto fn=Display13FBMemory::field<decltype(&receiver)>(c,0x1bf8);
  return fn(Display13FBMemory::field<void*>(c,0x1c00),inc?uint32_t(a+1):a,v,e);
 }
+uint32_t originalRegister(void *c,void *request) {
+ // Native RegisterAGDCCallback's verified two-store ABI. Optional pinned
+ // replay below executes the real donor implementation instead.
+ auto words=static_cast<uintptr_t *>(request);put(c,0x1bf8,words[1]);put(c,0x1c00,words[0]);++registrations;return 0;
+}
+bool XE::wrapTGLFramebufferStart(IOService *c,IOService*) {
+ assert(!lockDepth && c==&controller && callbackXE->framebufferStartInProgress && !callbackXE->framebufferStartedController);
+ assert(policyEligible(c)); // Native start-created child can match real plist now.
+ ++nativeStartCalls;void *client=(void*)1;
+ assert(XE::wrapFramebufferUserClient(&fb,(void*)0x1234,(void*)0x5678,0,&client)==kIOReturnNotReady && !client && !clientCalls);
+ return true;
+}
 void reset(XE &s){fb={};controller={};controller.meta.size=0x1c20;clientCalls=0;
  s.framebufferProtocolCalls=0;s.framebufferStartedController=&controller;
  s.adlnTopologyController=s.tglObservationController=&controller;put(&fb,0x1d0,&controller);put(&controller,0x1bf8,(uintptr_t)receiver);}
@@ -79,7 +109,7 @@ void clients(XE &s){
    case 2:s.adlnTopologyController=&other;break;case 3:fb.meta.size=0x100;break;case 4:controller.meta.size=0x100;break;
    case 5:put(&fb,0x1d0,(IOService*)nullptr);break;case 6:FramebufferDonor::Call::close(s.framebufferProtocolCalls);break;}
   auto before=fb;void *client=(void*)1;assert(open(&client)==kIOReturnNotReady&&!client&&!clientCalls);
-  assert(!memcmp(&before,&fb,sizeof(fb)));
+  assert(!memcmp(before.bytes,fb.bytes,sizeof(fb.bytes)) && before.meta.size==fb.meta.size && before.properties==fb.properties);
  }
  reset(s);put(&controller,0x1bf8,uintptr_t(0));void *client=(void*)1;
  assert(open(&client)==kIOReturnNotReady&&!client&&!clientCalls);
@@ -97,9 +127,26 @@ void events(){
   assert(callbackCalls==(invoked&&registered?1U:0U));
  }
 }
+void deferredPolicy(XE &s) {
+ reset(s);s.display13FramebufferRequested=false;s.adlsDisplaySelected=true;
+ s.framebufferStartedController=nullptr;put(&controller,0x1bf8,uintptr_t(0));put(&controller,0x1c00,uintptr_t(0));
+ assert(XE::wrapFramebufferStart(&controller,&other) && nativeStartCalls==1);
+ assert(s.framebufferStartedController==&controller && policyEligible(&controller));
+ void *client=(void*)1;assert(open(&client)==kIOReturnNotReady && !client && !clientCalls);
+ // A real policy receiver has not registered yet: receiver notifications still
+ // refuse dispatch. Native child eligibility grants no callback admission.
+ assert(XE::wrapFramebufferAGDCCallback(&controller,12,0,0)==0);
+ assert(XE::wrapFramebufferAGDCCallback(&controller,4,0,0)==kIOReturnNotReady && !callbackCalls);
+ uintptr_t request[]={0,(uintptr_t)receiver};
+ assert(!XE::wrapTGLAGDCRegister(&controller,request) && registrations==1);
+ assert(open(&client)==result && client==&controller && clientCalls==1);
+ assert(!XE::wrapFramebufferStart(&controller,&other) && nativeStartCalls==1 && policyEligible(&controller));
+ s.adlsDisplaySelected=false;
+}
 int main(int argc,char **argv){
  XE s;XE::callbackXE=&s;s.orgFramebufferUserClient=(uintptr_t)originalClient;s.orgFramebufferAGDCCallback=(uintptr_t)originalCallback;
  clients(s);events();
+ s.orgTGLAGDCRegister=(uintptr_t)originalRegister;callbackCalls=0;deferredPolicy(s);
  s.display13FramebufferRequested=false;events();reset(s);put(&controller,0x1bf8,uintptr_t(0));
  void *blocked=(void*)1;assert(open(&blocked)==kIOReturnNotReady && !blocked);
  s.display13FramebufferRequested=true;void *client=nullptr;assert(open(&client,1000)==result+1000);
@@ -127,11 +174,12 @@ int main(int argc,char **argv){
   assert(open(&client)==result&&client==&controller);munmap(mem,length);
   puts("PASS exact donor client tail call, registration and 512 guarded/native event cases");
  }
- puts("PASS production AGDC admission, retry without FB mutation, passthrough, start/stop publication and installer refusals");
+ puts("PASS production AGDC admission, ADL-S child eligibility before native start, deferred registration ABI, preserved pre-registration refusal and installer guards");
 }
 '''.replace('FUNCTIONS',functions)
 for old,key in [('CLIENT_ENTRY','clientEntry'),('CALLBACK_ENTRY','callbackEntry'),('DISPATCH','dispatch')]:code=code.replace(old,arrays[key])
 with tempfile.TemporaryDirectory(prefix='display13-agdc-') as d:
  p=Path(d);(p/'test.cpp').write_text(code)
- subprocess.run(['clang++','-arch','x86_64','-std=c++17','-O1','-g','-fsanitize=address,undefined','-I'+str(r/'WhateverXe'),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
+ architecture=['-arch','x86_64'] if len(sys.argv)>1 else []
+ subprocess.run(['clang++',*architecture,'-std=c++17','-O1','-g','-fsanitize=address,undefined','-I'+str(r/'WhateverXe'),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')]+sys.argv[1:],check=True)
