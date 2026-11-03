@@ -20507,12 +20507,34 @@ void XE::wrapADLSInitHDCP(void *path) {
     FunctionCast(wrapADLSInitHDCP,self->orgADLSInitHDCP)(path);
 }
 
+// Read-only live display snapshot for diagnostics: no writes, no power references.
+static void *adlsLiveAccess;
+static uint32_t (*adlsLiveRead)(void *,unsigned long);
+static const uint32_t adlsLiveRegisters[]={0x45404,0x45444,0x45454,0x46010,0x46014,0x164280,0x16428C,0x164290,
+    0x46140,0x60400,0x64300,0x70008,0x60000,0x6000C,0x70180,0x7019C,0x70040,0x70044,0xC4000,0x6C894,0x6C888,0x6C890,0x6C89C};
+static bool adlsLiveSerialize(void *,void *,OSSerialize *serializer) {
+    uint32_t out[2+sizeof(adlsLiveRegisters)/4] {1,sizeof(adlsLiveRegisters)/4};
+    auto read=__atomic_load_n(&adlsLiveRead,__ATOMIC_ACQUIRE);
+    auto access=__atomic_load_n(&adlsLiveAccess,__ATOMIC_ACQUIRE);
+    if(access && read)for(unsigned i=0;i<sizeof(adlsLiveRegisters)/4;++i)out[2+i]=read(access,adlsLiveRegisters[i]);
+    auto data=OSData::withBytes(out,sizeof(out));if(!data)return false;
+    const bool ok=data->serialize(serializer);data->release();return ok;
+}
+
 // Without an Intel GOP nothing maps GGTT[0..] onto the stolen memory;
 // stale entries then feed scanout and the native recycled-RAM export. Write
 // the linear firmware mapping (gen8+ GGTT encoding) for the usable range
 // only when GGTT[0] does not already name the decoded stolen base.
 void XE::wrapADLSFBMemInit(void *controller) {
     auto c=static_cast<uint8_t *>(controller);
+    if(c && *reinterpret_cast<void **>(c+0xC40) && !adlsLiveAccess) {
+        auto self=callbackXE;
+        __atomic_store_n(&adlsLiveRead,reinterpret_cast<uint32_t (*)(void *,unsigned long)>(self->orgTGLRegisterRead ? self->orgTGLRegisterRead : self->adlsRegisterReadFn),__ATOMIC_RELEASE);
+        __atomic_store_n(&adlsLiveAccess,*reinterpret_cast<void **>(c+0xC40),__ATOMIC_RELEASE);
+        if(auto live=OSSerializer::forTarget(nullptr,adlsLiveSerialize)) {
+            IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSDisplayLive",live);live->release();
+        }
+    }
     uint64_t r[16] {1};
     auto pci=c ? OSDynamicCast(IOPCIDevice,*reinterpret_cast<OSObject **>(c+0xC60)) : nullptr;
     auto gsm=c ? *reinterpret_cast<volatile uint8_t **>(c+0xCA0) : nullptr;
