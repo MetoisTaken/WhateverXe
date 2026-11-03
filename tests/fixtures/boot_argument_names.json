@@ -155,5 +155,6 @@
   "-wex-nostolen-ggtt": [],
   "-wex-hdmi-hdcp": [],
   "-wex-native-hdmi-swing": [],
+  "-wex-rpls-hang-dump": [],
   "-wex-noboot-seed": []
 }

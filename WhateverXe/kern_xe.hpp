@@ -157,6 +157,8 @@ private:
     static void wrapADLSInitHDCP(void *path);
     mach_vm_address_t adlsPortReadFn {},adlsPortWriteFn {};
     static uint32_t adlsHDMISwingOverride(void *port,uint32_t result);
+    mach_vm_address_t orgRPLSHangDump {};
+    static void wrapRPLSHangDump(void *ring);
     static uint32_t tglSignalLevelsBody(void *port, uint32_t swing, uint32_t emphasis, void *overrideConfig);
     XELP::SmallGTResources display12SmallGT;
     XELP::Profile xeProfile;
