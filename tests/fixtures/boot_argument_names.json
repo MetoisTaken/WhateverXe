@@ -154,5 +154,6 @@
   "-wex-boot-ddi4": [],
   "-wex-nostolen-ggtt": [],
   "-wex-hdmi-hdcp": [],
+  "-wex-native-hdmi-swing": [],
   "-wex-noboot-seed": []
 }

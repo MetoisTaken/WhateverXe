@@ -13870,6 +13870,12 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
                     0x91D9A,entry,sizeof(entry),wrapADLSInitHDCP,orgADLSInitHDCP,true);
                 IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMIHDCPGateReady",routed);
             }
+            if(adlsDisplaySelected && !checkKernelArgument("-wex-native-hdmi-swing")) {
+                // Applied from the existing signal-level route; never route it twice.
+                adlsPortReadFn=adlsDonorSymbol(patcher,index,address,size,"__ZN14AppleIntelPort14readRegister32Ej",0x1FE8E);
+                adlsPortWriteFn=adlsDonorSymbol(patcher,index,address,size,"__ZN14AppleIntelPort15writeRegister32Ejj",0x1FEA8);
+                IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMISwingReady",adlsPortReadFn && adlsPortWriteFn);
+            }
 			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN17AppleIntelPortHAL14enableComboPhyEv", wrapTGLEnableCombo, orgTGLEnableCombo},
@@ -20438,6 +20444,52 @@ void XE::wrapADLSEnableClocks(void *controller,void *port,void *otherPort,uint32
     tglTransitionRecord(71,true,port,encoded.cfg0,encoded.cfg1,0);
 }
 
+// The donor programs its own combo-PHY entry for HDMI (swing 2, cursor 0x18,
+// no post-cursor, no N-scalar). Fixed RPL-S HDMI routes then fail above
+// 1.5 Gb/s/lane. Reapply the firmware-selected combo PHY HDMI entry.
+uint32_t XE::adlsHDMISwingOverride(void *port,uint32_t result) {
+    auto self=callbackXE;
+    if(!self->adlsPortReadFn || !self->adlsPortWriteFn)return result;
+    auto b=static_cast<uint8_t *>(port);
+    auto config=b ? *reinterpret_cast<uint32_t **>(b+0x548) : nullptr;
+    if(result || !config || !self->adlsDisplaySelected || !self->adlsWiring.matches(config,false) ||
+       !self->adlsWiring.bound(self->tglPlatformCopy,config))return result;
+    AlderLakeS::Port route;
+    if(!AlderLakeS::Port::resolve(config[0],route))return result;
+    const uint32_t base=route.phyBase();
+    // Bank slots validated by comboRegisters: TX_DW2_GRP and TX_DW4_LN0.
+    if(*reinterpret_cast<uint32_t *>(b+0x5AC+4*10)!=base+0x688 ||
+       *reinterpret_cast<uint32_t *>(b+0x5F0)!=base+0x890)return result;
+    // {swing_sel, n_scalar, cursor, post_cursor_2, post_cursor_1}
+    static const uint8_t table[7][5]={{0xA,0x60,0x3F,0,0},{0xB,0x73,0x36,0,9},{6,0x7F,0x31,0,0xE},
+        {0xB,0x73,0x3F,0,0},{6,0x7F,0x37,0,8},{6,0x7F,0x3F,0,0},{6,0x7F,0x35,0,0xA}};
+    const auto preset=config[0]<XELP::PortCount ? self->firmwarePorts.port[config[0]].hdmiPreset : UINT32_MAX;
+    const auto &e=table[preset<7 ? preset : 6];
+    auto read=reinterpret_cast<uint32_t (*)(void *,uint32_t)>(self->adlsPortReadFn);
+    auto write=reinterpret_cast<void (*)(void *,uint32_t,uint32_t)>(self->adlsPortWriteFn);
+    uint32_t r[12] {1,config[0],preset,base};
+    auto dw5=read(port,base+0x894);write(port,base+0x694,dw5&~0x80000000U);
+    dw5=read(port,base+0x894);
+    dw5=(dw5&~((7U<<18)|(7U<<3)|(1U<<30)|(1U<<29)))|(2U<<18)|(6U<<3)|(1U<<29);
+    write(port,base+0x694,dw5);
+    auto dw2=read(port,base+0x888);
+    dw2=(dw2&~((7U<<11)|(1U<<15)|0xFFU))|(uint32_t((e[0]>>3)&1)<<15)|(uint32_t(e[0]&7)<<11)|0x98U;
+    write(port,base+0x688,dw2);r[4]=dw2;
+    for(uint32_t ln=0;ln<4;++ln) {
+        auto v=read(port,base+0x890+0x100*ln);
+        v=(v&~((0x3FU<<12)|(0x3FU<<6)|0x3FU))|(uint32_t(e[4])<<12)|(uint32_t(e[3])<<6)|e[2];
+        write(port,base+0x890+0x100*ln,v);if(!ln)r[5]=v;
+        auto n=read(port,base+0x89C+0x100*ln);
+        n=(n&~(0x7FU<<24))|(uint32_t(e[1])<<24);
+        write(port,base+0x89C+0x100*ln,n);if(!ln)r[6]=n;
+    }
+    dw5=read(port,base+0x894);write(port,base+0x694,dw5|0x80000000U);
+    r[7]=read(port,base+0x894);r[8]=read(port,base+0x888);r[9]=read(port,base+0x890);r[10]=read(port,base+0x89C);
+    static uint32_t count {};r[11]=__atomic_add_fetch(&count,1,__ATOMIC_RELAXED);
+    IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMISwing",r,sizeof(r));
+    return result;
+}
+
 // Native initHDCP already leaves no HDCP object for a type-0 port; callers
 // handle that null. Do the same for bound fixed HDMI combo routes only.
 void XE::wrapADLSInitHDCP(void *path) {
@@ -21402,6 +21454,10 @@ void XE::wrapTGLFIALaneCount(void *port,uint32_t lanes) {
 // Linux v6.12 tgl_dkl_phy_trans_dp_hbr2. Use its synchronous PortDriveConfig
 // override, keeping the native lane mask, RMW, PMD hook and return value.
 uint32_t XE::wrapTGLSignalLevels(void *port, uint32_t swing, uint32_t emphasis, void *overrideConfig) {
+	return adlsHDMISwingOverride(port,tglSignalLevelsBody(port,swing,emphasis,overrideConfig));
+}
+
+uint32_t XE::tglSignalLevelsBody(void *port, uint32_t swing, uint32_t emphasis, void *overrideConfig) {
 	uint32_t comboResult=0;
 	if(tglProgramComboSignal(port,swing,emphasis,overrideConfig,comboResult))return comboResult;
 	auto bytes = static_cast<uint8_t *>(port);

@@ -155,6 +155,9 @@ private:
     static void wrapADLSFBMemInit(void *controller);
     mach_vm_address_t orgADLSInitHDCP {};
     static void wrapADLSInitHDCP(void *path);
+    mach_vm_address_t adlsPortReadFn {},adlsPortWriteFn {};
+    static uint32_t adlsHDMISwingOverride(void *port,uint32_t result);
+    static uint32_t tglSignalLevelsBody(void *port, uint32_t swing, uint32_t emphasis, void *overrideConfig);
     XELP::SmallGTResources display12SmallGT;
     XELP::Profile xeProfile;
     XELP::VBT::Ports firmwarePorts;
