@@ -28,6 +28,12 @@ struct Ports {
     Status status {Status::Missing};
     uint32_t version {},bytes {},present {},unmapped {},ambiguous {};
     uint32_t checksum {};
+    // The authoritative first bounded General Definitions inventory is
+    // complete and contains only NONE
+    // placeholders and recognized external HDMI/DP types. Optional panel
+    // timing blocks, backend exclusions and a missing panel record cannot
+    // establish this fact. Unknown/internal/unmapped children keep it false.
+    bool externalOnly {};
     struct Panel {
         bool valid {},lowSwing {},hobl {};
         uint32_t type {},ddi {PortCount};
@@ -251,13 +257,18 @@ inline Ports parse(const void *data,size_t length,Family family,const uint8_t *i
     const auto stride=children[4];
     if(stride<38 || stride>64 || (childBytes-5)%stride)return r;
     const uint8_t *records[PortCount] {};uint16_t panelHandle=0;
+    bool externalOnly=childBytes>5;
     for(size_t at=5;at<childBytes;at+=stride) {
         const auto c=children+at;const auto type=u16(c+2);
+        // DEVICE_TYPE_HDMI / DP / DP_DUAL_MODE. This
+        // deliberately narrow absence certificate does not infer the class
+        // of other nonzero types, including records skipped below.
+        if(type && type!=0x60D2 && type!=0x68C6 && type!=0x60D6)externalOnly=false;
         // Non-digital placeholders have no DVO association. ADL-S firmware
         // includes TV/CRT entries with DVO0 alongside the real digital A.
         if(!(type&2))continue;
         const auto d=ddi(family,c[16]);
-        if(d==PortCount){++r.unmapped;continue;}
+        if(d==PortCount){externalOnly=false;++r.unmapped;continue;}
         if(r.present&(1U<<d)) {
             // Identical wire records carry no competing ownership. Preserve
             // every byte (including the native handle) when deciding equality.
@@ -269,6 +280,7 @@ inline Ports parse(const void *data,size_t length,Family family,const uint8_t *i
         r.present|=1U<<d;
         if(!q.fixedTMDS())r.ambiguous|=1U<<d;
     }
+    r.externalOnly=externalOnly && r.present;
     r.status=Status::Valid;panelFacts(b,bh,bs,r,identity,panelHandle);return r;
 }
 // OpRegion acquisition descriptor, kept pure for malformed/overflow testing.

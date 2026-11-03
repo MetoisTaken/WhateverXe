@@ -63,7 +63,7 @@ inline uint32_t gmbus(uint32_t vbtPin) {
 // hotplug. Unsupported or ambiguous routes stay excluded; never guess a port.
 struct Wiring {
     uint32_t hdmi {},dp {},excluded {},pin[XELP::PortCount] {},panel {};
-    bool valid {};
+    bool valid {},excludeDonorPanel {};
     uint32_t selected() const {return hdmi|dp|panel;}
     bool hasDP(uint32_t d) const {return valid && d<XELP::PortCount && (dp&(1U<<d));}
     bool matches(const uint32_t *c,bool wantDP) const {
@@ -107,6 +107,15 @@ struct Wiring {
         if(!valid || !selected() || (panel&~1U) || (panel&(hdmi|dp)) || (selected()&~ComboBackendMask) || !platform || bytes<0x1C0)return false;
         auto p=static_cast<uint8_t *>(platform);
         if(p[0x12]!=9)return false;
+        if(excludeDonorPanel) {
+            // Native word4=1 is the dummy connector; zero word5 removes
+            // the donor's unconditional panel-connected flag. Never apply
+            // this to a selected A route or an unrecognized predecessor.
+            const uint32_t panel[]={0,0,0,0,2,0x18};
+            if((selected()&1) || memcmp(p+0x20,panel,sizeof(panel)))return false;
+            for(unsigned d=0;d<XELP::PortCount;++d)
+                if(*reinterpret_cast<const uint32_t *>(p+0x20+24*d)!=d)return false;
+        }
         // The exact donor's platform tail selects no TCON / Camellia / Banksia.
         // VBT-qualified PWM uses native PPS, not an Apple TCON protocol.
         const auto tcon=*reinterpret_cast<const uint32_t *>(p+0x190);
@@ -125,6 +134,10 @@ struct Wiring {
             c[1]=pin[d];c[2]=isDP?1:2;c[3]=0;c[4]=isDP?0x400:0x800;c[5]=isDP?0x201:0x202;
         }
         if(panel)*reinterpret_cast<uint32_t *>(p+0x190)=0;
+        if(excludeDonorPanel) {
+            const uint32_t excluded[]={1,0};
+            memcpy(p+0x20+16,excluded,sizeof(excluded));
+        }
         return true;
     }
     static Wiring fromFirmware(const XELP::VBT::Ports &ports) {
@@ -155,6 +168,8 @@ struct Wiring {
             if(shared)continue;
             (isDP?out.dp:out.hdmi)|=1U<<d;out.pin[d]=bus;out.excluded&=~(1U<<d);
         }
+        out.excludeDonorPanel=ports.externalOnly && !ports.unmapped &&
+            !ports.panel.valid && !(ports.present&1) && !out.panel;
         out.valid=true;return out;
     }
 };

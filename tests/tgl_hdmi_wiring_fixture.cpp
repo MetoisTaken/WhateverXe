@@ -66,7 +66,40 @@ void expectUnchangedExcept(const uint8_t *after,std::initializer_list<unsigned> 
  auto expected=std::vector<uint8_t>(original,original+sizeof(original));for(auto at:offsets)memcpy(expected.data()+at,after+at,4);
  assert(!memcmp(after,expected.data(),sizeof(original)));
 }
+XELP::VBT::Ports externalFirmware(uint32_t extraType) {
+ std::vector<uint8_t> b(78+39*5);memcpy(b.data(),"$VBT",4);
+ const auto w16=[&](unsigned at,unsigned n){b[at]=n;b[at+1]=n>>8;};
+ w16(22,48);w16(24,b.size());b[28]=48;
+ memcpy(b.data()+48,"BIOS_DATA_BLOCK ",16);w16(64,250);w16(66,22);w16(68,b.size()-48);
+ b[70]=2;w16(71,b.size()-73);b[77]=39;
+ const XELP::VBT::Port ports[]={{0x60D2,1,2},{0x60D2,2,3},
+  {0x60D6,9,4,0x30},{0x60D6,11,5,0x50},{extraType,10,0,0x40}};
+ for(unsigned n=0;n<5;++n){const auto at=78+39*n;const auto &p=ports[n];
+  w16(at+2,p.type);b[at+16]=p.dvo;b[at+19]=p.ddc;b[at+25]=p.aux;}
+ return XELP::VBT::parse(b.data(),b.size(),XELP::Family::RaptorLakeS);
+}
 int main(){
+ // The real immutable firmware loader and native platform-copy wrapper use
+ // the parsed complete inventory; unknown or incomplete panel facts retain A.
+ for(unsigned extraType:{0U,0x1000U,0x78C6U,0x8002U}) {
+  setup();object.adlsDisplaySelected=true;object.firmwarePorts=externalFirmware(extraType);
+  assert(object.firmwarePorts.valid() && !object.firmwarePorts.panel.valid);
+  assert(object.firmwarePorts.externalOnly==!extraType);
+  reinterpret_cast<uint32_t *>(original+0x68)[1]=9;
+  reinterpret_cast<uint32_t *>(original+0x80)[1]=10;
+  IOService provider;assert(XE::tglLoadHDMIWiring(&provider));
+  assert(object.adlsWiring.excludeDonorPanel==!extraType && object.adlsWiring.excluded==((extraType&2)?0x61U:0x60U));
+  assert(XE::wrapTGLGetOSInformation(controller) && platform()!=original);
+  assert(object.adlsWiring.bound(platform(),reinterpret_cast<uint32_t *>(platform()+0x68)));
+  assert(object.adlsWiring.bound(platform(),reinterpret_cast<uint32_t *>(platform()+0x80)));
+  if(!extraType) {
+   assert(reinterpret_cast<uint32_t *>(platform()+0x20)[4]==1 && !reinterpret_cast<uint32_t *>(platform()+0x20)[5]);
+   expectUnchangedExcept(platform(),{0x30,0x34,0x70,0x74,0x78,0x7C,0x88,0x8C,0x90,0x94});
+  } else {
+   assert(!memcmp(platform()+0x20,original+0x20,24));
+   expectUnchangedExcept(platform(),{0x70,0x74,0x78,0x7C,0x88,0x8C,0x90,0x94});
+  }
+ }
  // ADL-S uses the same real entry points, while preserving the physical
  // TC1 record and converting its PHY classification from Dekel to Combo.
  setup();object.adlsDisplaySelected=true;
