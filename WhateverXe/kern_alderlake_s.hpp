@@ -101,7 +101,11 @@ struct Wiring {
     }
     uint32_t hotplugMode(bool ready,const uint32_t *c,const void *platform,
                          uintptr_t caller,uintptr_t hpdCaller,uint32_t requested) const {
-        return ready && boundDP(platform,c) && hpdCaller && caller==hpdCaller && requested==4 ? 1 : requested;
+        // Native legacy-HPD requests TC mode4 for every TC-labelled DDI. These
+        // routes are fixed combo PHYs: mode4 makes native treat HDMI as a DP
+        // alt-mode sink (AUX/DP-HDCP), so fixed HDMI keeps Combo mode1 too.
+        const bool fixed=boundDP(platform,c) || (matches(c,false) && bound(platform,c));
+        return ready && fixed && hpdCaller && caller==hpdCaller && requested==4 ? 1 : requested;
     }
     bool apply(void *platform,size_t bytes) const {
         if(!valid || !selected() || (panel&~1U) || (panel&(hdmi|dp)) || (selected()&~ComboBackendMask) || !platform || bytes<0x1C0)return false;

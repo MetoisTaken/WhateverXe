@@ -79,7 +79,7 @@ int main() {
             assert(w.matches(c) && w.bound(platform,c));
             const bool isDP=dp&(1U<<d);
             assert(w.hasDP(d)==isDP && w.boundDP(platform,c)==isDP);
-            assert(w.hotplugMode(true,c,platform,0x100,0x100,4)==(isDP?1:4));
+            assert(w.hotplugMode(true,c,platform,0x100,0x100,4)==1);
             assert(w.hotplugMode(false,c,platform,0x100,0x100,4)==4);
             assert(w.hotplugMode(true,c,platform,0x101,0x100,4)==4);
             assert(w.hotplugMode(true,c,platform,0,0,4)==4);
