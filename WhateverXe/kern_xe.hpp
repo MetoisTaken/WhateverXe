@@ -149,6 +149,8 @@ private:
     static void wrapADLSEnableClocks(void *controller,void *port,void *otherPort,uint32_t *params);
     mach_vm_address_t orgADLSPortInit {};
     static bool wrapADLSPortInit(void *port,uint32_t *config);
+    mach_vm_address_t orgADLSSetupBootDisplay {},adlsAllocateBootResources {},adlsPortByDDIFn {},adlsRegisterReadFn {};
+    static int wrapADLSSetupBootDisplay(void *controller);
     XELP::SmallGTResources display12SmallGT;
     XELP::Profile xeProfile;
     XELP::VBT::Ports firmwarePorts;

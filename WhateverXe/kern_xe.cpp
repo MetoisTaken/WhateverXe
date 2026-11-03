@@ -4058,6 +4058,26 @@ extern "C" __attribute__((naked, used)) void tglGuCDMAWriteBridge() {
 
 // RPLS_MEMORY_IMPLEMENTATION_BEGIN
 #include "kern_rpls_memory.inc.hpp"
+// Exact-donor lookup for the RPL-S display bring-up: accept a symbol only at
+// its expected unslid offset and, when given, with its expected entry bytes.
+static mach_vm_address_t adlsDonorSymbol(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size,
+    const char *name,mach_vm_address_t offset,const uint8_t *entry=nullptr,size_t length=0) {
+    const auto fn=patcher.solveSymbol<mach_vm_address_t>(index,name,address,size);
+    patcher.clearError();
+    if(fn!=address+offset || offset+length>size || (entry && memcmp(reinterpret_cast<const void *>(fn),entry,length)))return 0;
+    return fn;
+}
+
+// Route an exact-donor function; fails closed when the lookup does not match.
+template<class Wrapper> static bool adlsDonorRoute(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size,
+    const char *name,mach_vm_address_t offset,const uint8_t *entry,size_t length,Wrapper wrapper,mach_vm_address_t &original,bool shortRoute) {
+    if(!adlsDonorSymbol(patcher,index,address,size,name,offset,entry,length))return false;
+    KernelPatcher::RouteRequest route(name,wrapper,original);
+    const bool routed=shortRoute ? patcher.routeMultipleShort(index,&route,1,address,size) : patcher.routeMultiple(index,&route,1,address,size);
+    patcher.clearError();
+    return routed;
+}
+
 // RPLS_MEMORY_IMPLEMENTATION_END
 
 void XE::init() {
@@ -13818,6 +13838,21 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
                 IORegistryEntry::getRegistryRoot()->setProperty("ADLSPortInitReady",adlsPortInitReady);
                 patcher.clearError();
             }
+            if(adlsDisplaySelected && !checkKernelArgument("-wex-noboot-seed")) {
+                // Without a GOP-lit transcoder native setupBootDisplay leaves every
+                // FB without a display path; seed the first one on the exact donor.
+                static const uint8_t setupEntry[]={0x55,0x48,0x89,0xE5,0x41,0x56,0x53,0x48,0x83,0xEC,0x10};
+                static const uint8_t allocateEntry[]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x53,0x50};
+                adlsAllocateBootResources=adlsDonorSymbol(patcher,index,address,size,
+                    "__ZN21AppleIntelFramebuffer28allocateBootDisplayResourcesEj",0x66EA0,allocateEntry,sizeof(allocateEntry));
+                adlsPortByDDIFn=adlsDonorSymbol(patcher,index,address,size,"__ZN14AppleIntelPort12getPortByDDIEj",0x1B1EA);
+                adlsRegisterReadFn=adlsDonorSymbol(patcher,index,address,size,
+                    "__ZN31AppleIntelRegisterAccessManager14ReadRegister32Em",0x5E344);
+                const bool routed=adlsAllocateBootResources && adlsPortByDDIFn && adlsRegisterReadFn &&
+                    adlsDonorRoute(patcher,index,address,size,"__ZN31AppleIntelFramebufferController16setupBootDisplayEv",
+                        0x4360A,setupEntry,sizeof(setupEntry),wrapADLSSetupBootDisplay,orgADLSSetupBootDisplay,false);
+                IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSBootSeedReady",routed);
+            }
 			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN17AppleIntelPortHAL14enableComboPhyEv", wrapTGLEnableCombo, orgTGLEnableCombo},
@@ -20384,6 +20419,59 @@ void XE::wrapADLSEnableClocks(void *controller,void *port,void *otherPort,uint32
     FunctionCast(wrapADLSEnableClocks,callbackXE->orgComboEnableClocks)(controller,port,otherPort,params);
     comboEndClock();
     tglTransitionRecord(71,true,port,encoded.cfg0,encoded.cfg1,0);
+}
+
+// When firmware lit nothing, seed FB0 the same way native setupBootDisplay does for
+// a valid external boot pipe: pipe A, FB0 online/boot bytes, native boot commit.
+// Any refusal restores every field and keeps native success semantics.
+int XE::wrapADLSSetupBootDisplay(void *controller) {
+    auto org=FunctionCast(wrapADLSSetupBootDisplay,callbackXE->orgADLSSetupBootDisplay);
+    const int result=org(controller);
+    uint32_t r[12] {1};
+    auto c=static_cast<uint8_t *>(controller);
+    auto publish=[&](uint32_t stage){r[1]=stage;IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSBootSeed",r,sizeof(r));};
+    r[2]=static_cast<uint32_t>(result);
+    if(!c || result!=0)return publish(1),result;
+    auto pipe=reinterpret_cast<uint32_t *>(c+0xD58);r[3]=*pipe;
+    if(*pipe!=0xFFFF)return publish(2),result;               // firmware boot display exists
+    if(c[0xE55] || !*reinterpret_cast<uint32_t *>(c+0xD5C))return publish(3),result;
+    auto fb=*reinterpret_cast<uint8_t **>(c+0xD60);
+    if(!fb || *reinterpret_cast<uint32_t *>(fb+0x1DC)!=0 || fb[0x1E7] ||
+       *reinterpret_cast<int32_t *>(fb+0x3FD8)!=-1)return publish(4),result;
+    // Read-only PCH live hotplug status; TC1..TC4 pins 24..27 carry DDI3..6 on ADL-S.
+    auto access=*reinterpret_cast<void **>(c+0xC40);
+    uint32_t sde=0,ctl=0;
+    if(access && callbackXE->adlsRegisterReadFn) {
+        auto read=reinterpret_cast<uint32_t (*)(void *,unsigned long)>(callbackXE->adlsRegisterReadFn);
+        sde=read(access,0xC4000);ctl=read(access,0xC4034);
+    }
+    r[4]=sde;r[5]=ctl;
+    const auto &w=callbackXE->adlsWiring;
+    uint32_t ddi=0xFF;
+    for(uint32_t d=3;d<7 && ddi==0xFF;++d)if(w.valid && (w.hdmi&(1U<<d)) && (sde&(1U<<(21+d))))ddi=d;
+    r[6]=ddi;
+    // Before native hotplug enable the PCH pins read low. Then use an explicit
+    // flag, else the lowest VBT-wired HDMI DDI; native online info still
+    // decides whether that path's sink is really present.
+    uint32_t forced=0xFF;
+    if(checkKernelArgument("-wex-boot-ddi3"))forced=3;
+    else if(checkKernelArgument("-wex-boot-ddi4"))forced=4;
+    if(ddi==0xFF && forced!=0xFF && w.valid && (w.hdmi&(1U<<forced)))ddi=forced;
+    if(ddi==0xFF && forced==0xFF && w.valid)for(uint32_t d=3;d<XELP::PortCount && ddi==0xFF;++d)if(w.hdmi&(1U<<d))ddi=d;
+    r[7]=forced;r[8]=ddi;
+    if(ddi==0xFF)return publish(5),result;                   // no connected wired HDMI sink
+    auto port=reinterpret_cast<uint8_t *(*)(uint32_t)>(callbackXE->adlsPortByDDIFn)(ddi);
+    if(!port)return publish(6),result;
+    const uint32_t portIndex=*reinterpret_cast<uint32_t *>(port+0x120);r[9]=portIndex;
+    const uint8_t save[]={fb[0x1E0],fb[0x1E1],fb[0x44DE]};
+    *pipe=0;fb[0x44DE]=1;fb[0x1E0]=1;fb[0x1E1]=1;
+    const bool ok=reinterpret_cast<bool (*)(void *,uint32_t)>(callbackXE->adlsAllocateBootResources)(fb,portIndex);
+    r[10]=ok;r[11]=static_cast<uint32_t>(*reinterpret_cast<int32_t *>(fb+0x3FD8));
+    if(!ok) {
+        *pipe=0xFFFF;fb[0x1E0]=save[0];fb[0x1E1]=save[1];fb[0x44DE]=save[2];
+        return publish(7),result;
+    }
+    return publish(8),result;
 }
 
 bool XE::wrapADLSPortInit(void *port,uint32_t *config) {
