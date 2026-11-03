@@ -13853,6 +13853,15 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
                         0x4360A,setupEntry,sizeof(setupEntry),wrapADLSSetupBootDisplay,orgADLSSetupBootDisplay,false);
                 IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSBootSeedReady",routed);
             }
+            if(adlsDisplaySelected && !checkKernelArgument("-wex-nostolen-ggtt")) {
+                // Native FBMemMgr_Init derives the stolen pools, cursor/DSB and the
+                // recycled-RAM base from GGTT[0..], which only firmware maps.
+                static const uint8_t entry[]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x18};
+                const bool routed=adlsRegisterReadFn && adlsDonorRoute(patcher,index,address,size,
+                    "__ZN31AppleIntelFramebufferController13FBMemMgr_InitEv",0x42D34,entry,sizeof(entry),
+                    wrapADLSFBMemInit,orgADLSFBMemInit,true);
+                IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSStolenGGTTReady",routed);
+            }
 			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN17AppleIntelPortHAL14enableComboPhyEv", wrapTGLEnableCombo, orgTGLEnableCombo},
@@ -20419,6 +20428,46 @@ void XE::wrapADLSEnableClocks(void *controller,void *port,void *otherPort,uint32
     FunctionCast(wrapADLSEnableClocks,callbackXE->orgComboEnableClocks)(controller,port,otherPort,params);
     comboEndClock();
     tglTransitionRecord(71,true,port,encoded.cfg0,encoded.cfg1,0);
+}
+
+// Without an Intel GOP nothing maps GGTT[0..] onto the stolen memory;
+// stale entries then feed scanout and the native recycled-RAM export. Write
+// the linear firmware mapping (gen8+ GGTT encoding) for the usable range
+// only when GGTT[0] does not already name the decoded stolen base.
+void XE::wrapADLSFBMemInit(void *controller) {
+    auto c=static_cast<uint8_t *>(controller);
+    uint64_t r[16] {1};
+    auto pci=c ? OSDynamicCast(IOPCIDevice,*reinterpret_cast<OSObject **>(c+0xC60)) : nullptr;
+    auto gsm=c ? *reinterpret_cast<volatile uint8_t **>(c+0xCA0) : nullptr;
+    auto access=c ? *reinterpret_cast<void **>(c+0xC40) : nullptr;
+    if(pci && gsm && access) {
+        auto aperture=pci->getDeviceMemoryWithRegister(0x18);
+        auto layout=XELPMemory::decode(pci->configRead16(0x50),pci->configRead32(0xC0),pci->configRead32(0xC4),
+            aperture ? aperture->getLength() : 0);
+        r[2]=layout.valid;r[3]=layout.base;r[4]=layout.bytes;r[5]=layout.gttBytes;
+        if(layout.valid) {
+            auto read=reinterpret_cast<uint32_t (*)(void *,unsigned long)>(callbackXE->adlsRegisterReadFn);
+            const uint64_t reg=(uint64_t(read(access,0x1082C4))<<32)|read(access,0x1082C0);
+            r[6]=reg;r[7]=XELPMemory::reservation(layout,reg);
+        }
+        const uint64_t end=layout.usable();r[8]=end;
+        auto pte=[&](uint64_t i)->volatile uint32_t *{return reinterpret_cast<volatile uint32_t *>(gsm+8*i);};
+        const uint64_t first=(uint64_t(pte(0)[1])<<32)|pte(0)[0];r[9]=first;
+        if(layout.valid && end>=0x1000000 && (first&0x7FFFFFF000ULL)!=layout.base) {
+            for(uint64_t off=0;off<end;off+=4096) {
+                const auto value=layout.pte(off);auto p=pte(off>>12);
+                p[1]=static_cast<uint32_t>(value>>32);p[0]=static_cast<uint32_t>(value);
+            }
+            r[10]=end>>12;
+            r[11]=(uint64_t(pte((end>>12)-1)[1])<<32)|pte((end>>12)-1)[0];
+        }
+    }
+    FunctionCast(wrapADLSFBMemInit,callbackXE->orgADLSFBMemInit)(controller);
+    if(c) {
+        r[12]=*reinterpret_cast<uint64_t *>(c+0x1A28);r[13]=*reinterpret_cast<uint64_t *>(c+0x1AB0);
+        r[14]=*reinterpret_cast<uint32_t *>(c+0x1ABC);r[15]=*reinterpret_cast<uint32_t *>(c+0xDF8);
+    }
+    IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSStolenGGTT",r,sizeof(r));
 }
 
 // When firmware lit nothing, seed FB0 the same way native setupBootDisplay does for

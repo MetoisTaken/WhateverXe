@@ -151,6 +151,8 @@ private:
     static bool wrapADLSPortInit(void *port,uint32_t *config);
     mach_vm_address_t orgADLSSetupBootDisplay {},adlsAllocateBootResources {},adlsPortByDDIFn {},adlsRegisterReadFn {};
     static int wrapADLSSetupBootDisplay(void *controller);
+    mach_vm_address_t orgADLSFBMemInit {};
+    static void wrapADLSFBMemInit(void *controller);
     XELP::SmallGTResources display12SmallGT;
     XELP::Profile xeProfile;
     XELP::VBT::Ports firmwarePorts;
