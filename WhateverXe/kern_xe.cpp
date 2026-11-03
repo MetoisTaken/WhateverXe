@@ -76,6 +76,8 @@
 #include "kern_tgl_ppgtt.hpp"
 #include "kern_tgl_submit_capture.hpp"
 #include "kern_rpls_runtime_rcs.hpp"
+#include "kern_rpls_outgoing.hpp"
+#include "kern_rpls_outgoing_install.hpp"
 #include "kern_xelp_queue_trace.hpp"
 #include "kern_xelp_queue_memory.hpp"
 #include "kern_tgl_hang_refs.hpp"
@@ -457,6 +459,70 @@ bool tglCCSAlignmentSerialize(void *,void *,OSSerialize *serializer) {
 uintptr_t tglCPSAllocate {},tglCPSCPUAddress {},tglCPSGPUAddress {};
 uintptr_t tglCPSRestoreOriginal {},tglCPSRestoreCaller {};
 static bool tglContextCacheEnabled;
+static bool rplsCPSExecutionWitness;
+static bool rplsPlainContextProfile,rplsPlainContextReady;
+static uintptr_t rplsPlainContextClasses[4] {},rplsPlainContextOwner;
+static uint64_t rplsPlainContextReceipt[24] {1};
+static bool rplsPlainContextInstall(KernelPatcher &,size_t,mach_vm_address_t,size_t);
+bool tglVMRead(uint64_t,uint64_t &);
+// The exact bf35 constructor has already allocated both native images here,
+// but has not built their register commands, ring or submission descriptor.
+// Keep the allocated companion: native copyContextImage reads it unconditionally.
+// This adaptation selects the native plain-context branches for every new RCS.
+// The accepted donor's layout and native branches were independently verified.
+static void rplsPlainContextStore(void *context) {reinterpret_cast<uint8_t *>(context)[0x6E]=0x0C;}
+static void rplsPlainContextBefore(void *context,uintptr_t caller) {
+ if(!rplsPlainContextProfile || !rplsPlainContextReady)return;
+ auto q=rplsPlainContextReceipt;
+ auto set=[&](unsigned i,uint64_t v){__atomic_store_n(q+i,v,__ATOMIC_RELAXED);};
+ auto refuse=[&](unsigned stage){set(8,stage);__atomic_fetch_add(q+6,1ULL,__ATOMIC_RELAXED);};
+ __atomic_fetch_add(q+4,1ULL,__ATOMIC_RELAXED);
+ const auto c=reinterpret_cast<uintptr_t>(context);set(9,c);set(10,caller);set(21,0);
+ auto range=[](uint64_t p,uint64_t n){return (p>>47)==0x1FFFF && n && p+n>=p && ((p+n-1)>>47)==0x1FFFF;};
+ if(caller!=tglCPSRestoreCaller || !range(c,0xD8) || (c&7)){refuse(1);return;}
+ uint64_t v=0,owner=0,task=0,kernel=0,state=0,ring=0,channel=0;
+ if(!tglVMRead(c,v) || v!=rplsPlainContextClasses[0] || !tglVMRead(c+0x50,owner) ||
+    owner!=reinterpret_cast<uintptr_t>(tglHost.owner) || !range(owner,0x1408) ||
+    !tglVMRead(owner,v) || v!=rplsPlainContextClasses[1] ||
+    !tglVMRead(c+0x58,task) || !range(task,0x20) || !tglVMRead(task,v) || v!=rplsPlainContextClasses[2] ||
+    !tglVMRead(task+0x10,v) || v!=owner || !tglVMRead(owner+0x150,kernel) || !range(kernel,0x20) ||
+    !tglVMRead(kernel,v) || v!=rplsPlainContextClasses[2] || !tglVMRead(kernel+0x10,v) || v!=owner ||
+    !tglVMRead(c+0x68,state) || ((state>>32)&255) ||
+    !tglVMRead(c+0xB0,ring) || ring || !tglVMRead(c+0xB8,channel) || channel) {refuse(2);return;}
+ set(11,owner);set(12,task);set(13,(state>>48)&255);set(14,(state>>48)&255);set(21,7);
+ const auto flags=uint8_t(state>>48);
+ if(flags==0x0C) {set(8,6);__atomic_fetch_add(q+7,1ULL,__ATOMIC_RELAXED);return;}
+ if(flags!=0x1C){refuse(3);return;}
+ uint64_t image=0,posh=0,cpu=0,bytes=0,safe=0,safePosh=0;
+ auto buffer=[&](uint64_t p,uint64_t size) {
+  return range(p,0x48) && tglVMRead(p,v) && v==rplsPlainContextClasses[3] &&
+   tglVMRead(p+0x10,v) && v==owner && tglVMRead(p+0x18,v) && v==kernel &&
+   tglVMRead(p+0x20,bytes) && bytes==size && tglVMRead(p+0x38,cpu) && !(cpu&4095) && range(cpu,size);
+ };
+ if(!tglVMRead(c+0x98,image) || !buffer(image,81920)){refuse(3);return;}
+ set(15,image);set(22,cpu);set(23,bytes);
+ if(!tglVMRead(c+0xA0,posh) || !buffer(posh,16384) || image==posh ||
+    !tglVMRead(owner+0x1268,safe) || !tglVMRead(owner+0x1270,safePosh)){refuse(3);return;}
+ set(16,posh);set(19,safe);set(20,safePosh);set(21,15);
+ // Establish the first image's origin before accepting later safe-image clones.
+ // No pre-existing POSH golden source may enter an all-constructor trial.
+ if(!rplsPlainContextOwner) {
+  if(tglHost.startingOwner!=reinterpret_cast<void *>(owner) || tglHost.startupDone || safe || safePosh){refuse(4);return;}
+  rplsPlainContextOwner=owner;
+ }
+ if(rplsPlainContextOwner!=owner){refuse(4);return;}
+ // Native init copies this byte from its immutable preset. Keep every other
+ // field and the A0 owning pointer intact, including the normal false-return
+ // restore path that initializes the first image from the native template.
+ rplsPlainContextStore(context);
+ set(14,0x0C);set(8,5);__atomic_fetch_add(q+5,1ULL,__ATOMIC_RELAXED);
+}
+static bool rplsPlainContextSerialize(void *,void *,OSSerialize *serializer) {
+ uint64_t out[24] {1,rplsPlainContextProfile,rplsPlainContextReady};
+ for(unsigned i=3;i<24;++i)out[i]=__atomic_load_n(rplsPlainContextReceipt+i,__ATOMIC_RELAXED);
+ auto data=OSData::withBytes(out,sizeof(out));if(!data)return false;
+ const bool ok=data->serialize(serializer);data->release();return ok;
+}
 static uintptr_t tglContextCacheInitOriginal;
 static bool tglAlderLakeNGoldenRestore(void *context);
 static void adlnCaptureOwnedGolden(void *context);
@@ -496,8 +562,23 @@ static bool tglCPSPrepare(void *owner) {
  // complete TGL timer value after every context restore; no read/modify/write.
  // r160: Wa_1606931601, masked EU early-read disable. Existing multicast
  // steering is retained; this adds no CPU MMIO write or synchronization wait.
- const uint32_t batch[] {0,0x11000005,0x7304,0x02000200,0x6604,0xE0040000,0xE4F4,0x40004000,0x05000000};
- bzero(cpu,extent);memcpy(cpu,batch,sizeof(batch));
+ uint32_t batch[] {0,0x11000005,0x7304,0x02000200,0x6604,0xE0040000,0xE4F4,0x40004000,
+  0x05000000,0,0,0,0,0,0,0,0};
+ size_t batchBytes=9*sizeof(uint32_t);
+ if(rplsCPSExecutionWitness) {
+  // Privileged RCS post-restore SRM writes into this allocation's unused
+  // padding. The original immediate NOOP and all three LRI writes remain.
+  batch[8]=0x12400002;batch[9]=0x2234;batch[10]=static_cast<uint32_t>(gpu+0x800);batch[11]=0;
+  batch[12]=0x12400002;batch[13]=0x2238;batch[14]=static_cast<uint32_t>(gpu+0x804);batch[15]=0;
+  batch[16]=0x05000000;batchBytes=sizeof(batch);
+ }
+ bzero(cpu,extent);memcpy(cpu,batch,batchBytes);
+ if(rplsCPSExecutionWitness) {
+  // Distinct initial words are markers only. Publication or an untouched
+  // sentinel alone is not evidence that the GPU executed SRM.
+  const uint32_t initial[] {0xD15EA5E1,0xD15EA5E2};
+  memcpy(cpu+0x800,initial,sizeof(initial));
+ }
  if(tglContextCacheEnabled)TGLContextCache::batch(cpu);
  // Publish CPU writes before first GPU use, independent of LLC policy.
  for(unsigned i=0;i<extent;i+=64)asm volatile("clflush (%0)"::"r"(cpu+i):"memory");
@@ -534,7 +615,10 @@ static bool tglCPSRestorePointer(void *context,uintptr_t caller) {
 }
 bool tglCPSRestore(void *context) {
  const auto caller=reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+ rplsPlainContextBefore(context,caller);
  const bool result=FunctionCast(tglCPSRestore,tglCPSRestoreOriginal)(context);
+ if(rplsPlainContextProfile && caller==tglCPSRestoreCaller)
+  __atomic_fetch_add(rplsPlainContextReceipt+(result?17:18),1ULL,__ATOMIC_RELAXED);
  if(result && caller==tglCPSRestoreCaller)adlnCaptureOwnedGolden(context);
  return result && tglCPSRestorePointer(context,caller) &&
   (caller!=tglCPSRestoreCaller || tglAlderLakeNGoldenRestore(context));
@@ -2491,6 +2575,10 @@ void tglHostRegisters(uint64_t *q) {
  auto b=tglHostBase(); if (!b) return;
  for (uint32_t i=0;i<arrsize(tglHostRegs);++i) q[i]=*reinterpret_cast<volatile uint32_t *>(b+tglHostRegs[i]);
 }
+static bool rplsOutgoingReady;
+static bool rplsOutgoingSerialize(void *,void *,OSSerialize *);
+static bool rplsOutgoingInstallSerialize(void *,void *,OSSerialize *);
+static bool rplsOutgoingInstall(KernelPatcher &,size_t,mach_vm_address_t,size_t);
 // Bounded RCS execution receipts. Read only during an existing acquired render
 // wake: the submit bracket or a successful native multithreaded wake call. No
 // timer, extra wake, register write, pop/FIFO port, allocation or GPU request.
@@ -3981,6 +4069,8 @@ void XE::selectProfile(const XELP::Profile &profile) {
     rplsMemoryRequested=rplsMemoryAdmitted && !checkKernelArgument("-wex-rpls-ggtt-compat-off") &&
         !checkKernelArgument("-wex-noaccel") && !checkKernelArgument("-wex-tgl-off");
     // RPLS_MEMORY_PROFILE_END
+    rplsCPSExecutionWitness=rplsMemoryAdmitted;
+    rplsPlainContextProfile=rplsMemoryAdmitted;
     display12SmallGTDetected=profile.admitted() && XELP::display12SmallGT(profile.gt);
     adlsDisplaySelected=profile.admitted() && XELP::displayAdapter(profile.family)==XELP::DisplayAdapter::ADLS;
     adlnNativeRCSProfileRequested=false;
@@ -12416,6 +12506,31 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 				if (hostOK)
 					hostOK=installTGLCSB12(patcher,index,address,size);
 			}
+            if(rplsMemoryAdmitted) {
+             rplsRuntimeReady=rplsRuntimeReady && hostOK;
+             auto root=IORegistryEntry::getRegistryRoot();
+             root->setProperty("WEXRPLSRuntimeRCSReady",rplsRuntimeReady);
+             rplsOutgoingReady=rplsRuntimeReady && rplsOutgoingInstall(patcher,index,address,size);
+             root->setProperty("WEXRPLSOutgoingReady",rplsOutgoingReady);
+             if(auto live=OSSerializer::forTarget(nullptr,rplsOutgoingInstallSerialize)) {
+              root->setProperty("WEXRPLSOutgoingInstall",live);live->release();
+             }
+             if(auto live=OSSerializer::forTarget(nullptr,rplsOutgoingSerialize)) {
+              root->setProperty("WEXRPLSOutgoingLifetime",live);live->release();
+             }
+             if(auto live=OSSerializer::forTarget(nullptr,rplsRuntimeSerialize)) {
+              root->setProperty("WEXRPLSRuntimeRCSState",live);live->release();
+             }
+             if(auto live=OSSerializer::forTarget(nullptr,tglExecutionSerialize,reinterpret_cast<void *>(1))) {
+              root->setProperty("WEXRPLSRuntimeRCSExecution",live);live->release();
+             }
+             if(auto live=OSSerializer::forTarget(nullptr,tglSubmitCaptureSerialize)) {
+              root->setProperty("WEXRPLSRuntimeRCSSubmit",live);live->release();
+             }
+             if(auto live=OSSerializer::forTarget(nullptr,tglFaultSerialize,reinterpret_cast<void *>(1))) {
+              root->setProperty("WEXRPLSRuntimeRCSFault",live);live->release();
+             }
+            }
             if(adlnDetected && checkKernelArgument("-wex-adln-qtrace")) {
              const char *create="__ZN19IGAccelCommandQueue29createHardwareContextIfNeededEh";
              const char *process="__ZN19IGAccelCommandQueue20processCommandBufferEjj";
@@ -12685,6 +12800,11 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			}
 			patcher.clearError();
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLCPSColorPipeReady",cpsOK);
+			rplsPlainContextReady=rplsPlainContextProfile && cpsOK && rplsPlainContextInstall(patcher,index,address,size);
+			IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSPlainContextReady",rplsPlainContextReady);
+			if(rplsPlainContextProfile)if(auto live=OSSerializer::forTarget(nullptr,rplsPlainContextSerialize)) {
+				IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSPlainContext",live);live->release();
+			}
 			// Linux Gen12 Wa_18022495364: an INDIRECT_CTX cache invalidation,
 			// distinct from ring PIPE_CONTROL. Keep the per-context batch intact.
 			bool contextCacheOK=!contextCacheRequested;
@@ -15110,6 +15230,7 @@ bool XE::wrapTGLAcceleratorStart(IOService *that, IOService *provider) {
     (callbackXE->display12SmallGTDetected && !callbackXE->display12SmallGTReady) ||
     (callbackXE->adlsDisplaySelected && (!callbackXE->adlsDisplayHooksReady ||
      __atomic_load_n(&callbackXE->adlsBootConsumersFailed,__ATOMIC_ACQUIRE))))return false;
+ if(rplsPlainContextProfile && !rplsPlainContextReady)return false;
  if (callbackXE->adlnDetected && adlnNativeRCSProfileRequested && !adlnNativeRCSProfileReady) {
   SYSLOG("igfx", "AlderLakeN native RCS profile qualification rejected accelerator start");
   return false;
@@ -15888,6 +16009,296 @@ struct TGLCSBEngine {
 // `index > 4` exit is AFTER construction, so it also constructs ID5.
 } tglCSBEngines[6];
 
+// Immediate CPU copies under the same native bank serialization as dispatch.
+// Publication is immutable; later hooks compare historical scalar identities
+// and read only their own live native arguments, never a retired raw pointer.
+static RPLSOutgoing::Snapshot rplsOutgoingSnapshot;
+static RPLSOutgoingInstall::Record rplsOutgoingInstallRecord;
+static uint32_t rplsOutgoingInstallPublished;
+static RPLSOutgoing::Event rplsOutgoingEvents[RPLSOutgoing::Capacity];
+static uint32_t rplsOutgoingState, rplsOutgoingBlocked, rplsOutgoingCount, rplsOutgoingFreeMask;
+static uint64_t rplsOutgoingBufferClass,rplsOutgoingRingClass,rplsOutgoingContextCheck;
+static uintptr_t rplsOutgoingContextFreeOriginal,rplsOutgoingBufferFreeOriginal,rplsOutgoingUnmapOriginal;
+static bool rplsOutgoingLive() {
+ using namespace RPLSOutgoing;
+ uint64_t flags=0;
+ return rplsOutgoingReady && !__atomic_load_n(&rplsOutgoingBlocked,__ATOMIC_ACQUIRE) &&
+  __atomic_load_n(&rplsOutgoingState,__ATOMIC_ACQUIRE)==2 &&
+  !rplsOutgoingSnapshot.q[Status] && rplsOutgoingSnapshot.q[Stable] &&
+  reinterpret_cast<uintptr_t>(tglHost.owner)==rplsOutgoingSnapshot.q[Owner] &&
+  tglVMRead(reinterpret_cast<uintptr_t>(tglHost.owner)+0x1190,flags) && !(flags&0x1000);
+}
+static RPLSOutgoing::Event *rplsOutgoingEvent(unsigned kind,uint64_t object) {
+ if(!rplsOutgoingLive())return nullptr;
+ const auto n=__atomic_fetch_add(&rplsOutgoingCount,1U,__ATOMIC_RELAXED);
+ if(n>=RPLSOutgoing::Capacity)return nullptr;
+ auto &e=rplsOutgoingEvents[n];auto q=e.q;q[0]=kind;tglHostClock(q+1);q[3]=object;
+ q[4]=rplsOutgoingSnapshot.q[RPLSOutgoing::Owner];
+ q[5]=reinterpret_cast<uintptr_t>(current_thread());return &e;
+}
+static void rplsOutgoingFinish(RPLSOutgoing::Event *e) {
+ if(!e)return;tglHostClock(e->q+2);__atomic_store_n(&e->ready,1U,__ATOMIC_RELEASE);
+}
+static bool rplsOutgoingClaimFree(unsigned bit) {
+ return !(__atomic_fetch_or(&rplsOutgoingFreeMask,bit,__ATOMIC_RELAXED)&bit);
+}
+static void rplsOutgoingContextFree(void *object) {
+ using namespace RPLSOutgoing;
+ Event *event=nullptr;
+ if(rplsOutgoingLive() && reinterpret_cast<uintptr_t>(object)==rplsOutgoingSnapshot.q[Context] &&
+  rplsOutgoingClaimFree(1)) {
+  event=rplsOutgoingEvent(1,reinterpret_cast<uintptr_t>(object));
+  if(event) {
+   const unsigned offsets[] {0,0x50,0x60,0x7C,0x89,0x98,0xA0,0xB0};
+   for(unsigned i=0;i<arrsize(offsets);++i)
+    if(tglVMRead(reinterpret_cast<uintptr_t>(object)+offsets[i],event->q[8+i]))event->q[6]|=1ULL<<i;
+  }
+ }
+ FunctionCast(rplsOutgoingContextFree,rplsOutgoingContextFreeOriginal)(object);
+ rplsOutgoingFinish(event); // Only static storage, after the object may be gone.
+}
+static void rplsOutgoingBufferFree(void *object) {
+ using namespace RPLSOutgoing;
+ Event *event=nullptr;
+ if(rplsOutgoingLive()) {
+  const auto p=reinterpret_cast<uintptr_t>(object);const auto q=rplsOutgoingSnapshot.q;
+  const unsigned role=p==q[LRCBuffer]?2:p==q[RingBuffer]?4:p==q[POSHBuffer]?8:0;
+  if(role && rplsOutgoingClaimFree(role)) {
+   event=rplsOutgoingEvent(role==2?2:role==4?3:4,p);
+   if(event) {
+    const unsigned offsets[] {0,0x10,0x20,0x30,0x38};
+    for(unsigned i=0;i<arrsize(offsets);++i)
+     if(tglVMRead(p+offsets[i],event->q[8+i]))event->q[6]|=1ULL<<i;
+   }
+  }
+ }
+ FunctionCast(rplsOutgoingBufferFree,rplsOutgoingBufferFreeOriginal)(object);
+ rplsOutgoingFinish(event);
+}
+static uint64_t rplsOutgoingRange(void *table,uint64_t start,uint64_t length) {
+ if(!rplsOutgoingLive())return 0;
+ uint64_t owner=0;
+ if(!tglVMRead(reinterpret_cast<uintptr_t>(table)+0x10,owner) ||
+  owner!=rplsOutgoingSnapshot.q[RPLSOutgoing::Owner])return 0;
+ return RPLSOutgoing::watched(rplsOutgoingSnapshot,start,length);
+}
+static void rplsOutgoingUnmap(void *table,const uint64_t *range) {
+ RPLSOutgoing::Event *event=nullptr;uint64_t start=0,length=0;
+ if(rplsOutgoingLive() && tglVMRead(reinterpret_cast<uintptr_t>(range),start) &&
+  tglVMRead(reinterpret_cast<uintptr_t>(range)+8,length)) {
+  const auto mask=rplsOutgoingRange(table,start,length);
+  if(mask) {
+   event=rplsOutgoingEvent(5,reinterpret_cast<uintptr_t>(table));
+   if(event){event->q[6]=mask;event->q[8]=start;event->q[9]=length;}
+  }
+ }
+ FunctionCast(rplsOutgoingUnmap,rplsOutgoingUnmapOriginal)(table,range);
+ rplsOutgoingFinish(event);
+}
+static RPLSOutgoing::Event *rplsOutgoingMapBegin(void *table,uint64_t start,uint64_t length,
+ uint64_t physical,uint64_t flags) {
+ const auto mask=rplsOutgoingRange(table,start,length);if(!mask)return nullptr;
+ auto e=rplsOutgoingEvent(6,reinterpret_cast<uintptr_t>(table));
+ if(e){e->q[6]=mask;e->q[8]=start;e->q[9]=length;e->q[10]=physical;e->q[11]=flags;}
+ return e;
+}
+static void __attribute__((noinline)) rplsOutgoingBeforeHandler(void *streamer,uint8_t *owner,unsigned engine,
+ const TGLCSB::Event &event,TGLCSB::Source source) {
+ using namespace RPLSOutgoing;
+ if(!rplsOutgoingReady || engine || !selected(event))return;
+ auto &e=tglCSBEngines[0];const auto epoch=e.resets;
+ auto guard=[&]() {
+  return !__atomic_load_n(&rplsOutgoingBlocked,__ATOMIC_ACQUIRE) &&
+   tglHost.captureStarted && tglHost.owner==owner &&
+   (tglHost.startingOwner==owner || __atomic_load_n(&tglHost.startupDone,__ATOMIC_ACQUIRE)) &&
+   e.streamer==streamer && e.hardwareReady && e.state.error==TGLCSB::Error::None &&
+   e.resets==epoch && epoch==1 && e.consumed==4;
+ };
+ if(!guard())return;
+ uint32_t empty=0;
+ if(!__atomic_compare_exchange_n(&rplsOutgoingState,&empty,1U,false,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED))return;
+ auto &s=rplsOutgoingSnapshot;auto q=s.q;tglHostClock(q+Begin);q[Epoch]=epoch;q[Consumed]=e.consumed;
+ q[Raw]=event.raw;q[Source]=static_cast<unsigned>(source);
+ capture(s,reinterpret_cast<uintptr_t>(streamer),reinterpret_cast<uintptr_t>(owner),
+  rplsOutgoingBufferClass,rplsOutgoingRingClass,rplsOutgoingContextCheck,tglVMRead,
+  [](uint64_t p,uint8_t *out,uint64_t n)->uint64_t {
+   return tglVM.nofault?tglVM.nofault(p,reinterpret_cast<uintptr_t>(out),n):0;
+  },guard);
+ tglHostClock(q+End);__atomic_store_n(&rplsOutgoingState,2U,__ATOMIC_RELEASE);
+}
+static bool rplsOutgoingSerialize(void *,void *,OSSerialize *serializer) {
+ const auto state=__atomic_load_n(&rplsOutgoingState,__ATOMIC_ACQUIRE);
+ const auto count=__atomic_load_n(&rplsOutgoingCount,__ATOMIC_RELAXED);
+ const uint64_t header[12] {1,rplsOutgoingReady,state,
+  __atomic_load_n(&rplsOutgoingBlocked,__ATOMIC_ACQUIRE),RPLSOutgoing::Words,8192,4096,
+  RPLSOutgoing::Capacity,RPLSOutgoing::EventWords,count,
+  count>RPLSOutgoing::Capacity?count-RPLSOutgoing::Capacity:0,sizeof(RPLSOutgoing::Snapshot)};
+ auto data=OSData::withCapacity(sizeof(header)+sizeof(rplsOutgoingSnapshot)+
+  RPLSOutgoing::Capacity*(RPLSOutgoing::EventWords+1)*sizeof(uint64_t));if(!data)return false;
+ static const RPLSOutgoing::Snapshot empty;
+ const uint64_t zero[RPLSOutgoing::EventWords] {};
+ const bool qualified=state==2 && !rplsOutgoingSnapshot.q[RPLSOutgoing::Status] &&
+  rplsOutgoingSnapshot.q[RPLSOutgoing::Stable];
+ bool ok=data->appendBytes(header,sizeof(header)) &&
+  data->appendBytes(state==2?rplsOutgoingSnapshot.q:empty.q,sizeof(empty.q)) &&
+  data->appendBytes(qualified?rplsOutgoingSnapshot.lrc:empty.lrc,sizeof(empty.lrc)) &&
+  data->appendBytes(qualified?rplsOutgoingSnapshot.ring:empty.ring,sizeof(empty.ring));
+ for(const auto &e:rplsOutgoingEvents) {
+  const uint64_t ready=__atomic_load_n(&e.ready,__ATOMIC_ACQUIRE)==1;
+  ok=ok && data->appendBytes(&ready,sizeof(ready)) && data->appendBytes(ready?e.q:zero,sizeof(zero));
+ }
+ if(ok)ok=data->serialize(serializer);data->release();return ok;
+}
+static bool rplsOutgoingInstallSerialize(void *,void *,OSSerialize *serializer) {
+ const auto published=__atomic_load_n(&rplsOutgoingInstallPublished,__ATOMIC_ACQUIRE);
+ const uint64_t header[4] {1,published,rplsRuntimeReady,rplsOutgoingReady};
+ static const RPLSOutgoingInstall::Record empty;
+ auto data=OSData::withCapacity(sizeof(header)+sizeof(empty));if(!data)return false;
+ bool ok=data->appendBytes(header,sizeof(header)) &&
+  data->appendBytes(published?&rplsOutgoingInstallRecord:&empty,sizeof(empty));
+ if(ok)ok=data->serialize(serializer);data->release();return ok;
+}
+static bool rplsOutgoingInstall(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+ auto &receipt=rplsOutgoingInstallRecord;auto h=receipt.q;h[0]=1;h[1]=1;h[4]=address;h[5]=size;
+ h[6]=rplsRuntimeReady;tglHostClock(h+8);
+ auto finish=[&](unsigned stage,unsigned kind,unsigned item) {
+  h[1]=stage;h[2]=kind;h[3]=item;tglHostClock(h+9);patcher.clearError();
+  __atomic_store_n(&rplsOutgoingInstallPublished,1U,__ATOMIC_RELEASE);return stage==5;
+ };
+ // Resolve DATA pins within this exact module, retain the admitted donor
+ // layout, and independently qualify live readable DATA containment. Never
+ // treat a callback span as contiguous memory or apply a second slide.
+ const bool mapped=RPLSOutgoingInstall::inspect(receipt.layout,address,size,tglVMRead) &&
+  !receipt.layout.q[15] && receipt.layout.q[12]==0xB3336BFEC0A13ABAULL && receipt.layout.q[13]==0x3D4E3948F873859DULL;
+ auto copyText=[&](uint64_t source,uint64_t *destination,uint64_t length)->uint64_t {
+  if(!mapped || length>16 || !tglVM.nofault || !RPLSOutgoingInstall::textRange(receipt.layout,source,length))return 0;
+  return tglVM.nofault(source,reinterpret_cast<uintptr_t>(destination),length);
+ };
+ const uint8_t contextHead[] {0x55,0x48,0x89,0xE5,0x53,0x50,0x48,0x89,0xFB,0x48,0x8B,0x47,0x40};
+ const uint8_t bufferHead[] {0x55,0x48,0x89,0xE5,0x53,0x50,0x48,0x89,0xFB,0x48,0x83,0x7F,0x38,0x00};
+ const uint8_t unmapHead[] {0x55,0x48,0x89,0xE5,0x4C,0x8B,0x46,0x08,0x4D,0x85,0xC0,0x74,0x4B};
+ const char *symbols[] {"__ZN17IGHardwareContext4freeEv","__ZN20IGSharedMappedBuffer4freeEv",
+  "__ZN25IGHardwareGlobalPageTable10unmapRangeERK14IGAddressRange","__ZTV20IGSharedMappedBuffer",
+  "__ZTV24IGHardwareRingBufferMain","__ZNK17IGHardwareContext5checkEv"};
+ const uint64_t offsets[] {0x7C5D8,0x10AE0,0x10626,0xCCCC0,0xDF4E0,0x7C726};
+ const uint8_t *heads[] {contextHead,bufferHead,unmapHead,nullptr,nullptr,nullptr};
+ const size_t lengths[] {sizeof(contextHead),sizeof(bufferHead),sizeof(unmapHead),0,0,0};
+ unsigned firstFailed=0;
+ for(unsigned i=0;i<arrsize(symbols);++i) {
+  auto q=receipt.symbol[i];q[0]=offsets[i];patcher.clearError();
+  q[1]=patcher.solveSymbol<mach_vm_address_t>(index,symbols[i],address,size);
+  q[3]=static_cast<unsigned>(patcher.getError());patcher.clearError();
+  q[2]=patcher.solveSymbol(index,symbols[i]);
+  q[4]=q[2]>=address && q[2]-address<size;
+  if(q[4])h[12]|=1ULL<<i;
+  if(i==3 || i==4) {
+   q[7]=1;q[9]=address+(i==3?0x10AE0:0x41620);
+   q[5]=mapped && q[2]==address+offsets[i] && RPLSOutgoingInstall::dataClass(receipt.layout,q[2]) &&
+    tglVMRead(q[2]+16+0x90,q[8]) && q[8]==q[9];
+  } else {
+   q[5]=q[1]==address+offsets[i];
+   if(lengths[i])q[6]=copyText(address+offsets[i],q+8,lengths[i]);
+   q[7]=!lengths[i] || (q[6]==lengths[i] && !memcmp(q+8,heads[i],lengths[i]));
+  }
+  if(q[5])h[10]|=1ULL<<i;if(q[7])h[11]|=1ULL<<i;
+  if((!q[5] || !q[7]) && !firstFailed){firstFailed=i+1;h[7]=q[3];}
+  patcher.clearError();
+ }
+ KernelPatcher::RouteRequest routes[] {
+  {symbols[0],rplsOutgoingContextFree,rplsOutgoingContextFreeOriginal},
+  {symbols[1],rplsOutgoingBufferFree,rplsOutgoingBufferFreeOriginal},
+  {symbols[2],rplsOutgoingUnmap,rplsOutgoingUnmapOriginal}
+ };
+ // A short route avoids relocating the early conditional branch in unmap.
+ for(unsigned i=0;i<arrsize(routes);++i) {
+  auto q=receipt.route[i];q[0]=i+1;q[1]=address+offsets[i];q[2]=routes[i].to;
+  q[3]=q[2]-(q[1]+5);q[4]=q[3]==static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(q[3])));
+  if(q[4])h[15]|=1ULL<<i;
+  q[19]=copyText(q[1],q+16,16);
+ }
+ if(!mapped)return finish(2,1,0);
+ if(firstFailed)return finish(3,2,firstFailed);
+ for(unsigned i=0;i<arrsize(routes);++i)if(receipt.route[i][19]!=16)return finish(4,3,i+1);
+ rplsOutgoingBufferClass=receipt.symbol[3][2]+16;
+ rplsOutgoingRingClass=receipt.symbol[4][2]+16;
+ rplsOutgoingContextCheck=receipt.symbol[5][1];
+ for(unsigned i=0;i<arrsize(routes);++i) {
+  auto q=receipt.route[i];q[5]=1;h[13]|=1ULL<<i;patcher.clearError();
+  q[6]=patcher.routeMultipleShort(index,routes+i,1,address,size);
+  q[7]=static_cast<unsigned>(patcher.getError());q[8]=*routes[i].org;
+  const auto site=q[1];q[11]=copyText(site,q+9,16);auto bytes=reinterpret_cast<const uint8_t *>(q+9);
+  int32_t displacement=0;if(q[11]>=5)memcpy(&displacement,bytes+1,sizeof(displacement));
+  q[12]=q[11]>=5 && bytes[0]==0xE9;q[13]=site+5+static_cast<uint64_t>(static_cast<int64_t>(displacement));
+  q[14]=(q[6]?1:0) | (q[7]==static_cast<unsigned>(KernelPatcher::Error::NoError)?2:0) |
+   (RPLSOutgoing::range(q[8],16)?4:0) | (q[8]!=site && q[8]!=routes[i].to?8:0) |
+   (q[12]?16:0) | (q[13]==routes[i].to?32:0);
+  q[15]=q[14]==63;tglHostClock(q+18);
+  patcher.clearError();if(!q[15]){h[7]=q[7];return finish(4,3,i+1);}
+  h[14]|=1ULL<<i;
+ }
+ return finish(5,0,0);
+}
+
+// CPU-only bindings for the constructor adaptation. All commands and image
+// writes remain in the exact native bf35 constructor and its golden-copy path.
+static bool rplsPlainContextInstall(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+ auto &stage=rplsPlainContextReceipt[3];stage=1;
+ if(!rplsPlainContextProfile || !rplsOutgoingReady || !tglVM.nofault ||
+    !tglCPSRestoreOriginal || tglCPSRestoreCaller!=address+0x7C131)return false;
+ const auto &layout=rplsOutgoingInstallRecord.layout;
+ auto match=[&](uint64_t offset,const uint8_t *bytes,size_t length) {
+  uint8_t actual[64] {};
+  return length<=sizeof(actual) && offset<=size && length<=size-offset &&
+   RPLSOutgoingInstall::textRange(layout,address+offset,length) &&
+   tglVM.nofault(address+offset,reinterpret_cast<uintptr_t>(actual),length)==length && !memcmp(actual,bytes,length);
+ };
+ stage=2;
+ static const uint8_t p0[] {0x48,0x8B,0x0A,0x48,0x89,0x4F,0x6C,0x8B,0x4A,0x08,0x89,0x4F,0x74};
+ static const uint8_t p1[] {0x41,0xF6,0x45,0x6E,0x10,0x74,0x2C,0x49,0x8B,0x45,0x50,0x48,0x8B,0xB8,0x50,0x01,0x00,0x00,0xBE,0x00,0x40,0x00,0x00,0xBA,0x02,0x00,0x00,0x00,0x31,0xC9,0xE8,0xEE,0x4D,0xF9,0xFF,0x49,0x89,0x85,0xA0,0x00,0x00,0x00,0x48,0x85,0xC0,0x0F};
+ static const uint8_t p2[] {0x49,0x89,0x85,0x98,0x00,0x00,0x00,0x48,0x85,0xC0,0x0F,0x84,0x72,0x05,0x00,0x00};
+ static const uint8_t p3[] {0x49,0x8B,0xBD,0x98,0x00,0x00,0x00,0xE8,0x79,0x4F,0xF9,0xFF,0x49,0x89,0xC7,0x49,0x8B,0xBD,0xA0,0x00,0x00,0x00,0x48,0x85,0xFF,0x0F,0x84,0x2D,0x05,0x00,0x00,0xE8,0x61,0x4F,0xF9,0xFF,0x48,0x89,0xC3};
+ static const uint8_t p4[] {0x45,0x88,0x75,0x78,0x4C,0x89,0xEF,0xE8,0x2D,0x54,0xFC,0xFF,0x49,0x89,0x85,0xB0,0x00,0x00,0x00};
+ static const uint8_t p5[] {0x4C,0x89,0xEF,0xE8,0x61,0x02,0x00,0x00};
+ static const uint8_t p6[] {0x41,0xF6,0x45,0x6E,0x10,0x0F,0x85,0xE7,0x00,0x00,0x00,0xB8,0xEF,0xFF,0xEF,0xFF,0x41,0x23,0x87,0x0C,0x10,0x00,0x00,0x0D,0x00,0x00,0x10,0x00,0x41,0x89,0x87,0x0C,0x10,0x00,0x00};
+ static const uint8_t p7[] {0x4C,0x89,0xFF,0x48,0x81,0xC7,0x00,0x10,0x00,0x00,0x48,0x8D,0x35,0x09,0x43,0x04,0x00,0xBA,0x40,0x01,0x00,0x00,0xE8};
+ static const uint8_t p16[] {0x41,0xC7,0x87,0x40,0x11,0x00,0x00,0x01,0x00,0x00,0x05,0x41,0xC7,0x87,0x0C,0x10,0x00,0x00,0x01,0x00,0xFF,0xFF};
+ static const uint8_t p8[] {0x41,0xF6,0x45,0x6E,0x10,0x74,0x4A};
+ static const uint8_t p9[] {0x41,0xF6,0x45,0x6E,0x10,0x74,0x16,0xF7,0x80,0x90,0x11,0x00,0x00,0x00,0x80,0x01,0x00,0x74,0x0A,0x81,0x8B,0x0C,0x10,0x00,0x00,0x08,0x00,0x08,0x00};
+ static const uint8_t p10[] {0x41,0xF6,0x44,0x24,0x6E,0x10,0x74,0x31};
+ static const uint8_t p11[] {0x0F,0xB7,0x40,0x6E,0x75,0x09,0x31,0xC9};
+ static const uint8_t p12[] {0x83,0xE0,0x10,0x48,0xC1,0xE0,0x10,0x44,0x89,0xF7,0x83,0xE7,0xFC,0x48,0xC1,0xE7,0x20,0x48,0x09,0xD7,0x48,0x09,0xC7};
+ static const uint8_t p13[] {0x48,0x8B,0x4B,0x20,0xF6,0x41,0x6E,0x10,0x74,0x06,0x83,0xC0,0x05,0x89,0x43,0x3C};
+ static const uint8_t p14[] {0x44,0x22,0x00,0x00,0x00,0x00,0xFF,0xFF};
+ static const uint8_t p15[] {0x01,0x00,0x00,0x11,0xB0,0x21,0x00,0x00,0x00,0x00,0x00,0x00};
+ if(!match(0x7BA05,p0,sizeof(p0)))return false;
+ if(!match(0x7BB13,p1,sizeof(p1)))return false;
+ if(!match(0x7BB71,p2,sizeof(p2)))return false;
+ if(!match(0x7BBDB,p3,sizeof(p3)))return false;
+ if(!match(0x7BF39,p4,sizeof(p4)))return false;
+ if(!match(0x7C129,p5,sizeof(p5)))return false;
+ if(!match(0x7C15E,p6,sizeof(p6)))return false;
+ if(!match(0x7C186,p7,sizeof(p7)) || !match(0x7C1A1,p16,sizeof(p16)))return false;
+ if(!match(0x7C1B7,p8,sizeof(p8)))return false;
+ if(!match(0x7C27E,p9,sizeof(p9)))return false;
+ if(!match(0x7C421,p10,sizeof(p10)))return false;
+ if(!match(0x42FFC,p11,sizeof(p11)))return false;
+ if(!match(0x43021,p12,sizeof(p12)))return false;
+ if(!match(0x84D6E,p13,sizeof(p13)))return false;
+ if(!match(0xC04A8,p14,sizeof(p14)))return false;
+ if(!match(0xC0570,p15,sizeof(p15)))return false;
+ stage=3;
+ const char *symbols[] {"__ZTV17IGHardwareContext","__ZTV16IntelAccelerator","__ZTV11IGAccelTask","__ZTV20IGSharedMappedBuffer"};
+ const uint64_t offsets[] {0xDC380,0xD1060,0xCA5E0,0xCCCC0};
+ uintptr_t classes[4] {};
+ for(unsigned i=0;i<4;++i) {
+  patcher.clearError();const auto found=patcher.solveSymbol(index,symbols[i]);patcher.clearError();
+  if(found!=address+offsets[i] || !RPLSOutgoingInstall::dataClass(layout,found))return false;
+  classes[i]=found+16;
+ }
+ for(unsigned i=0;i<4;++i)rplsPlainContextClasses[i]=classes[i];
+ stage=4;return true;
+}
+
 struct TGLCSBIO {
  uint8_t *streamer, *owner;
  volatile uint8_t *hwsp, *bar;
@@ -15938,6 +16349,8 @@ struct TGLCSBIO {
 
 void tglCSBInitialize(void *streamer,uint32_t flags=0) {
  TGLCSBIO io(streamer,flags);auto &engine=tglCSBEngines[io.engine];
+ if(!io.engine && __atomic_load_n(&rplsOutgoingState,__ATOMIC_ACQUIRE))
+  __atomic_store_n(&rplsOutgoingBlocked,1U,__ATOMIC_RELEASE);
  // Called before the first submission, wake reset, or GPU-reset replay. Never
  // at reset's return: that method can submit GPU work before it returns.
  engine.streamer=streamer;TGLCSB::initialize(engine.state,io);
@@ -16123,6 +16536,7 @@ void XE::wrapTGLCSBProcess(void *streamer,uint32_t flags) {
     tglHostCSBFatal("ElementSwitch-second-item-null",words);
    }
   }
+  if(handler==3)rplsOutgoingBeforeHandler(streamer,io.owner,io.engine,event,sample.source);
   tglCSBMethods[handler](streamer,&entry);
   if (record) {
    // Existing fixed history: native return and resulting banks, no MMIO/wait.
@@ -17196,7 +17610,9 @@ void XE::tglInstallGuCFirmwarePTEs(uint32_t bufferIndex) {
 bool XE::wrapTGLGlobalMapRange(void *table, const uint64_t *range, uint64_t physical, uint64_t flags) {
 	// Exact donor ABI: range=(GPU start,length), then host physical base/PTE flags.
 	const auto start = range[0], size = range[1];
+ auto outgoing=rplsOutgoingMapBegin(table,start,size,physical,flags);
 	const bool result = FunctionCast(wrapTGLGlobalMapRange, callbackXE->orgTGLGlobalMapRange)(table, range, physical, flags);
+ if(outgoing)outgoing->q[12]=result;rplsOutgoingFinish(outgoing);
  auto b=tglHostBase();
  if (result && b && *reinterpret_cast<void **>(static_cast<uint8_t *>(table)+0x10)==tglHost.owner &&
   (tglHost.startupDone || tglHost.startThread==reinterpret_cast<uintptr_t>(current_thread()))) {

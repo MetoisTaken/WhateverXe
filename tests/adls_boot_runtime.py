@@ -8,6 +8,7 @@ entry=s[a:b]+' return true;\n}'
 code='''
 #include <cassert>
 struct IOService {};
+static bool rplsPlainContextProfile=false,rplsPlainContextReady=false;
 struct XE {
  bool tglGT2Detected=false,tglGT2Ready=false;
  bool display12SmallGTDetected=false,display12SmallGTReady=true;
@@ -23,6 +24,10 @@ int main(){
  assert(XE::wrapTGLAcceleratorStart(nullptr,nullptr));
  xe.adlsDisplaySelected=true;xe.adlsBootConsumersFailed=false;xe.adlsDisplayHooksReady=false;
  assert(!XE::wrapTGLAcceleratorStart(nullptr,nullptr));
+ xe.adlsDisplayHooksReady=true;rplsPlainContextProfile=true;
+ assert(!XE::wrapTGLAcceleratorStart(nullptr,nullptr));
+ rplsPlainContextReady=true;
+ assert(XE::wrapTGLAcceleratorStart(nullptr,nullptr));
 }
 '''
 with tempfile.TemporaryDirectory(prefix='adls-boot-runtime-') as d:

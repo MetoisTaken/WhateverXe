@@ -56,6 +56,7 @@ fixture = r'''
 #include "kern_xelp_os.hpp"
 #include "kern_rpls_memory.hpp"
 static bool rplsMemoryAdmitted,rplsMemoryRequested;
+static bool rplsCPSExecutionWitness,rplsPlainContextProfile;
 static const char *qualified = "Darwin Kernel Version 20.6.0: Thu Jul  6 22:12:47 PDT 2023; root:xnu-7195.141.49.702.12~1/RELEASE_X86_64";
 static const char *version = qualified;
 static std::set<std::string> args;
@@ -171,6 +172,8 @@ int main() {
   const bool mobile13=id==0x46A6 || id==0xA7A0;
   const bool small13=id==0x46D2;
   const bool render13=small13 || (mobile13 && !(option&2));
+  const bool rplsWitness=id==0xA780 && rev==4 && XELP::kernelOS(version)==XELP::OS::Tahoe;
+  assert(rplsCPSExecutionWitness==rplsWitness && rplsPlainContextProfile==rplsWitness);
   assert(selected.display12SmallGTDetected==(desktop || gt1) && selected.adlsDisplaySelected==desktop);
   assert(selected.adlnDetected==render13 && selected.display13FramebufferRequested==(small13 || mobile13));
   const bool d12=(desktop || mobile) && !(option&1);
@@ -191,6 +194,7 @@ int main() {
  xe=boot({},0x12348086,0x46D28086);
  assert(xe.adlnRequested && xe.adlnNativeRequested && xe.xeProfile.identity==0x12348086);
  xe=boot({},0x12348086,0x9A498086);assert(xe.tglRequested);
+ xe=boot({},0x12348086,0xA7808086);assert(!rplsCPSExecutionWitness);
  xe=XE{};xe.selectProfile(XELP::identify(0x46A68086,12,0x9A498086));
  assert(xe.adlpDisplaySelected && xe.adlpRenderRequested && xe.display13FramebufferRequested && xe.tglAcceleratorRequested && xe.adlnRequested && xe.tglRequested);
  assert(xe.xeProfile.family==XELP::Family::AlderLakeP && xe.xeProfile.gt==XELP::GT::ADLPMobile);
