@@ -75,6 +75,7 @@
 #include "kern_tgl_vm.hpp"
 #include "kern_tgl_ppgtt.hpp"
 #include "kern_tgl_submit_capture.hpp"
+#include "kern_rpls_runtime_rcs.hpp"
 #include "kern_xelp_queue_trace.hpp"
 #include "kern_xelp_queue_memory.hpp"
 #include "kern_tgl_hang_refs.hpp"
@@ -2508,22 +2509,35 @@ static_assert(16+arrsize(tglExecutionRegs)<=64,"RCS execution observation bounds
 static TGLExecutionRecord tglExecution[10];
 static uint64_t tglExecutionStart, tglExecutionDescriptor, tglExecutionStreamer;
 static uint32_t tglExecutionSubmit, tglExecutionSubmitted;
+// RPL-S is mutually exclusive with the AlderLakeN observer. Reuse its fixed
+// storage, but admit only one runtime submit and never collect startup samples.
+static bool rplsRuntimeReady;
+static RPLSRuntimeRCS::State rplsRuntimeState;
+static uint64_t rplsRuntimeThread;
+static uint32_t rplsRuntimeNativeDepth; // touched only by the selected thread
+static uint32_t rplsRuntimeCaptureState;
+static uint64_t rplsRuntimeCaptureMeta[6]; // ACK pair, intended pair, begin/end ns
 static void tglExecutionSample(unsigned slot,uint8_t *owner,unsigned domains,unsigned client,
- uint64_t streamer,uint32_t submit,uint64_t descriptor,bool kernelWaitReturn=false) {
+ uint64_t streamer,uint32_t submit,uint64_t descriptor,bool kernelWaitReturn=false,bool rpls=false) {
  if(slot>=arrsize(tglExecution) || owner!=tglHost.owner || !(domains&1) || client>15 ||
   (owner[0x1191]&0x10))return;
  auto b=tglHostBase();if(!b)return;
  const auto ack=*reinterpret_cast<volatile uint32_t *>(b+0xD84);
+ if(rpls && !RPLSRuntimeRCS::renderACK(ack,domains,client))return;
  if(!(ack&(1U<<client)))return;
  auto &r=tglExecution[slot];uint32_t empty=0;
  if(!__atomic_compare_exchange_n(&r.ready,&empty,2U,false,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED))return;
- auto q=r.q;q[0]=6;tglHostClock(q+1);q[2]=slot;q[3]=streamer;q[4]=submit;
+ auto q=r.q;q[0]=rpls?7:6;tglHostClock(q+1);q[2]=slot;q[3]=streamer;q[4]=submit;
  q[5]=descriptor;q[6]=__atomic_load_n(&tglExecutionStart,__ATOMIC_ACQUIRE);
  q[7]=domains;q[8]=client;q[9]=ack;q[10]=reinterpret_cast<uintptr_t>(current_thread());
  q[12]=kernelWaitReturn;
- q[13]=slot>=2 && checkKernelArgument("-wex-adln-kernel-early") && adlnKernelContextEntered;
+ q[13]=!rpls && slot>=2 && checkKernelArgument("-wex-adln-kernel-early") && adlnKernelContextEntered;
  for(unsigned i=0;i<arrsize(tglExecutionRegs);++i)
   q[16+i]=*reinterpret_cast<volatile uint32_t *>(b+tglExecutionRegs[i]);
+ if(rpls) {
+  q[14]=*reinterpret_cast<volatile uint32_t *>(b+0xD84);
+  q[15]=RPLSRuntimeRCS::renderACK(static_cast<uint32_t>(q[14]),domains,client);
+ }
  tglHostClock(q+11);__atomic_store_n(&r.ready,1U,__ATOMIC_RELEASE);
 }
 static void adlnCaptureKernelWaitReturn(uint8_t *owner) {
@@ -2537,14 +2551,15 @@ static void adlnCaptureKernelWaitReturn(uint8_t *owner) {
 // These registers require GT wake, so observe only a native acquired GT client.
 struct TGLFaultRecord { uint64_t q[24];uint32_t ready; };
 static TGLFaultRecord tglFault[5];
-static void tglFaultSample(unsigned slot,uint8_t *owner,unsigned client) {
+static void tglFaultSample(unsigned slot,uint8_t *owner,unsigned client,bool rpls=false) {
  if(slot>=arrsize(tglFault) || owner!=tglHost.owner || client>15 || (owner[0x1191]&0x10))return;
  auto b=tglHostBase();if(!b)return;
  const auto ack=*reinterpret_cast<volatile uint32_t *>(b+0x130044);
+ if(rpls && !RPLSRuntimeRCS::gtACK(ack,4,client))return;
  if(!(ack&(1U<<client)))return;
  auto &r=tglFault[slot];uint32_t empty=0;
  if(!__atomic_compare_exchange_n(&r.ready,&empty,2U,false,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED))return;
- auto q=r.q;q[0]=3;tglHostClock(q+1);q[2]=slot;q[3]=client;q[4]=ack;
+ auto q=r.q;q[0]=rpls?4:3;tglHostClock(q+1);q[2]=slot;q[3]=client;q[4]=ack;
  q[5]=__atomic_load_n(&tglExecutionStart,__ATOMIC_ACQUIRE);
  q[6]=*reinterpret_cast<volatile uint32_t *>(b+0xCEC4);
  q[7]=*reinterpret_cast<volatile uint32_t *>(b+0xCEB8);
@@ -2558,10 +2573,14 @@ static void tglFaultSample(unsigned slot,uint8_t *owner,unsigned client) {
  // Gen12 PAT0..7 share the GT forcewake domain. Preserve the real values;
  // never replace the native table or infer its application from static bytes.
  for(unsigned i=0;i<8;++i)q[14+i]=*reinterpret_cast<volatile uint32_t *>(b+0x4800+4*i);
+ if(rpls) {
+  q[22]=*reinterpret_cast<volatile uint32_t *>(b+0x130044);
+  q[23]=RPLSRuntimeRCS::gtACK(static_cast<uint32_t>(q[22]),4,client);
+ }
  tglHostClock(q+10);__atomic_store_n(&r.ready,1U,__ATOMIC_RELEASE);
 }
-static bool tglFaultSerialize(void *,void *,OSSerialize *serializer) {
- const uint64_t header[4] {3,arrsize(tglFault),24,14};
+static bool tglFaultSerialize(void *,void *argument,OSSerialize *serializer) {
+ const uint64_t header[4] {argument?4ULL:3ULL,arrsize(tglFault),24,14};
  auto data=OSData::withCapacity(sizeof(header)+arrsize(tglFault)*25*sizeof(uint64_t));
  if(!data)return false;bool ok=data->appendBytes(header,sizeof(header));const uint64_t empty[24] {};
  for(const auto &r:tglFault) {
@@ -2570,8 +2589,9 @@ static bool tglFaultSerialize(void *,void *,OSSerialize *serializer) {
  }
  if(ok)ok=data->serialize(serializer);data->release();return ok;
 }
-static bool tglExecutionSerialize(void *,void *,OSSerialize *serializer) {
- const uint64_t header[4] {6,arrsize(tglExecution),64,arrsize(tglExecutionRegs)};
+static bool tglExecutionSerialize(void *,void *argument,OSSerialize *serializer) {
+ const bool rpls=argument!=nullptr;
+ const uint64_t header[4] {rpls?7ULL:6ULL,arrsize(tglExecution),64,arrsize(tglExecutionRegs)};
  auto data=OSData::withCapacity(sizeof(header)+arrsize(tglExecution)*65*sizeof(uint64_t));
  if(!data)return false;bool ok=data->appendBytes(header,sizeof(header));
  const uint64_t empty[64] {};
@@ -2581,6 +2601,18 @@ static bool tglExecutionSerialize(void *,void *,OSSerialize *serializer) {
    data->appendBytes(ready?r.q:empty,sizeof(empty));
  }
  if(ok)ok=data->serialize(serializer);data->release();return ok;
+}
+static bool rplsRuntimeSerialize(void *,void *,OSSerialize *serializer) {
+ const auto phase=__atomic_load_n(&rplsRuntimeState.phase,__ATOMIC_ACQUIRE);
+ const auto captured=__atomic_load_n(&rplsRuntimeCaptureState,__ATOMIC_ACQUIRE);
+ uint64_t q[16] {1,rplsRuntimeReady,phase,captured};
+ if(phase>=2) {
+  q[4]=rplsRuntimeThread;q[5]=tglExecutionStart;q[6]=tglExecutionSubmit;
+  q[7]=tglExecutionStreamer;q[8]=tglExecutionDescriptor;
+ }
+ if(captured==2)memcpy(q+9,rplsRuntimeCaptureMeta,sizeof(rplsRuntimeCaptureMeta));
+ auto data=OSData::withBytes(q,sizeof(q));if(!data)return false;
+ const bool ok=data->serialize(serializer);data->release();return ok;
 }
 // Latest retained native successful map request, not an invented physical address.
 // Later unmap/reuse is not tracked: compare during initial startup only; unknown
@@ -2787,6 +2819,35 @@ static void tglCaptureSubmit(uint64_t ctx,uint64_t streamer,uint32_t submit,unsi
  if (n>=arrsize(tglSubmitCapture)) return;
  tglFillSubmitCapture(tglSubmitCapture[n],ctx,streamer,submit,bankSlot);
  __atomic_store_n(&tglSubmitCaptureReady[n],1U,__ATOMIC_RELEASE);
+}
+// Existing pre-SQ boundary: native LRC preparation has finished and this caller
+// retains the submit bank and render lease. Never read private objects later
+// from the wake callback. No native calls, allocations, or publication here.
+static void rplsRuntimeCaptureBeforeLoad(void *owner,const uint8_t *descriptor,
+ volatile uint8_t *base,const uint64_t *intended) {
+ if(!rplsRuntimeReady || !rplsRuntimeState.pending() || !descriptor || descriptor[0] ||
+    owner!=tglHost.owner || base!=tglHostBase() || !tglVM.enabled || !tglVM.nofault ||
+    rplsRuntimeThread!=reinterpret_cast<uintptr_t>(current_thread()))return;
+ if(rplsRuntimeNativeDepth!=1)return; // exclude nested same-streamer submissions
+ auto streamer=reinterpret_cast<uint8_t *>(tglExecutionStreamer);
+ if(!streamer || *reinterpret_cast<void **>(streamer+0x10)!=owner ||
+    *reinterpret_cast<const uint8_t **>(streamer+0x28)!=descriptor)return;
+ const auto active=*reinterpret_cast<uint32_t *>(streamer+0x50);
+ if(active>1)return;
+ const auto ack=*reinterpret_cast<volatile uint32_t *>(base+0xD84);
+ if(!RPLSRuntimeRCS::renderACK(ack,1,1))return;
+ uint32_t empty=0;
+ if(!__atomic_compare_exchange_n(&rplsRuntimeCaptureState,&empty,1U,false,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED))return;
+ auto q=rplsRuntimeCaptureMeta;q[0]=ack;q[2]=intended[0];q[3]=intended[1];tglHostClock(q+4);
+ for(unsigned i=0;i<2;++i) {
+  auto item=*reinterpret_cast<uint8_t **>(streamer+0x30+(1-active)*16+i*8);
+  auto ctx=item?*reinterpret_cast<uint8_t **>(item):nullptr;
+  uint64_t actual=0;if(ctx)memcpy(&actual,ctx+0x89,sizeof(actual));
+  if(ctx && (intended[i]&1) && (actual&~4ULL)==(intended[i]&~4ULL))
+   tglCaptureSubmit(reinterpret_cast<uintptr_t>(ctx),tglExecutionStreamer,tglExecutionSubmit,i);
+ }
+ q[1]=*reinterpret_cast<volatile uint32_t *>(base+0xD84);tglHostClock(q+5);
+ __atomic_store_n(&rplsRuntimeCaptureState,2U,__ATOMIC_RELEASE);
 }
 // Application-only, bounded passive receipts. The dedicated executable name
 // selects a PID once; native queue getters identify its retained graphics
@@ -3733,6 +3794,7 @@ extern "C" __attribute__((noinline, used)) void tglGuCDMAPreStartSnapshot(volati
 // Readbacks may drain posted writes and affect timing; this is an observer.
 extern "C" __attribute__((noinline, used)) void tglHostLoadSnapshot(void *owner,const uint8_t *d,volatile uint8_t *base,const uint64_t *intended,bool before) {
  if (!tglHost.owner || owner!=tglHost.owner || !d || base!=tglHostBase()) return;
+ if(before)rplsRuntimeCaptureBeforeLoad(owner,d,base,intended);
  uint32_t sq,load,ptr,csb;
  memcpy(&sq,d+0x19,4);memcpy(&load,d+0x1D,4);
  memcpy(&ptr,d+0x25,4);memcpy(&csb,d+0x29,4);
@@ -12289,9 +12351,11 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					patcher.solveSymbol<mach_vm_address_t>(index,"__ZN17IGInterruptBridge17serviceInterruptsERK8IGBitSetILm46EE",address,size)==address+0x4B3A0 &&
 					patcher.solveSymbol<mach_vm_address_t>(index,"__ZN26IGHardwareCommandStreamer536handleSoftwareContextSwitchInterruptEP22IOInterruptEventSourcei",address,size)==address+0x39C9C;
                 const uint8_t wakeHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x38};
-                hostOK=hostOK && (!adlnDetected || (size>0x2DA26 &&
+                const bool executionWakeKnown=(adlnDetected || rplsMemoryAdmitted) && size>0x2DA26 &&
                  patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator26SafeForceWakeMultithreadedEbjj",address,size)==address+0x2D5AA &&
-                 !memcmp(reinterpret_cast<void *>(address+0x2D5AA),wakeHead,sizeof(wakeHead))));
+                 !memcmp(reinterpret_cast<void *>(address+0x2D5AA),wakeHead,sizeof(wakeHead));
+                hostOK=hostOK && (!adlnDetected || executionWakeKnown);
+                patcher.clearError();
 				const uint8_t loadBlock[] {0x48,0x8B,0x7B,0x10,0x48,0x8B,0x4B,0x28,0x48,0x8B,0x87,0x40,0x12,0x00,0x00,0x31,0xD2,0x8D,0x34,0xD5,0x00,0x00,0x00,0x00,0x03,0x71,0x19,0x8B,0x5C,0xD5,0xC0,0x89,0x1C,0x30,0x8B,0x5C,0xD5,0xC4,0x89,0x5C,0x30,0x04,0x48,0x85,0xD2,0xBA,0x01,0x00,0x00,0x00,0x74,0xDD,0x8B,0x49,0x1D,0xC7,0x04,0x08,0x01,0x00,0x00,0x00,0xF6,0x87,0x72,0x0F,0x00,0x00,0x20};
 				auto loadSite=reinterpret_cast<uint8_t *>(address+0x3AA02);
 				hostOK=hostOK && size>0x3AA47 && !memcmp(loadSite,loadBlock,sizeof(loadBlock));
@@ -12333,6 +12397,11 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
                 if (hostOK && adlnDetected) {
                  KernelPatcher::RouteRequest wake {"__ZN16IntelAccelerator26SafeForceWakeMultithreadedEbjj",wrapAlderLakeNExecutionWake,orgAlderLakeNExecutionWake};
                  hostOK=patcher.routeMultiple(index,&wake,1,address,size);
+                } else if(hostOK && rplsMemoryAdmitted && executionWakeKnown) {
+                 // Diagnostic admission never changes the functional hostOK gate.
+                 KernelPatcher::RouteRequest wake {"__ZN16IntelAccelerator26SafeForceWakeMultithreadedEbjj",wrapAlderLakeNExecutionWake,orgAlderLakeNExecutionWake};
+                 rplsRuntimeReady=patcher.routeMultiple(index,&wake,1,address,size);
+                 patcher.clearError();
                 }
 				if (hostOK) {
 					tglHostLoadResume=address+0x3AA47;
@@ -16827,6 +16896,31 @@ void XE::wrapTGLHostSubmit(void *streamer,uint32_t flags) {
   if(executionSlot!=UINT32_MAX)tglExecutionSample(executionSlot,renderWakeOwner,1,1,
    reinterpret_cast<uintptr_t>(streamer),n,q[5]?q[5]:q[6]);
  }
+ // Independent of bounded startup histories: prior BCS traffic cannot consume
+ // this single runtime slot. The native caller still owns its submit banks.
+ bool rplsFirst=false;
+ if(rplsMemoryAdmitted && rplsRuntimeReady && tglHost.startupDone) {
+  const auto runtimeDescriptor=*reinterpret_cast<uint8_t **>(x+0x28);
+  rplsFirst=rplsRuntimeState.claim(true,true,true,
+   renderWakeOwner && renderWakeOwner==tglHost.owner &&
+   streamer==tglCSBEngines[0].streamer,runtimeDescriptor[0]);
+ }
+ if(rplsFirst) {
+  tglExecutionStreamer=reinterpret_cast<uintptr_t>(streamer);tglExecutionSubmit=n;
+  rplsRuntimeThread=reinterpret_cast<uintptr_t>(current_thread());
+  const auto active=*reinterpret_cast<uint32_t *>(x+0x50);
+  if(active<=1)for(unsigned i=0;i<2 && !tglExecutionDescriptor;++i) {
+   auto item=*reinterpret_cast<uint8_t **>(x+0x30+(1-active)*16+i*8);
+   auto ctx=item?*reinterpret_cast<uint8_t **>(item):nullptr;
+   if(ctx)memcpy(&tglExecutionDescriptor,ctx+0x89,sizeof(tglExecutionDescriptor));
+  }
+  uint64_t now;tglHostClock(&now);__atomic_store_n(&tglExecutionStart,now,__ATOMIC_RELEASE);
+  // Cover the interval before the original call too: an interrupt can nest
+  // this same thread/streamer after prepared() publishes the selection.
+  rplsRuntimeNativeDepth=1;
+  rplsRuntimeState.prepared();
+  tglExecutionSample(2,renderWakeOwner,1,1,tglExecutionStreamer,n,tglExecutionDescriptor,false,true);
+ }
  if(tglSameTailRestoreEnabled && tglCSB12Enabled && tglVM.nofault && renderWakeOwner &&
     streamer==tglCSBEngines[0].streamer && renderWakeOwner==tglHost.owner) {
   auto read=[](uint64_t p,void *out,unsigned n)->uint64_t {
@@ -16837,13 +16931,22 @@ void XE::wrapTGLHostSubmit(void *streamer,uint32_t flags) {
    reinterpret_cast<uint64_t>(streamer),tglCSBEngines[0].resets,read,force);
  } else if(tglSameTailEnabled && streamer==tglCSBEngines[0].streamer)tglSameTailState.previous={};
  if(renderWakeOwner)tglSubmitHistoryRecord(renderWakeOwner,streamer,n,0);
+ const bool rplsNative=rplsRuntimeReady && rplsRuntimeState.pending() &&
+  rplsRuntimeThread==reinterpret_cast<uintptr_t>(current_thread()) &&
+  tglExecutionStreamer==reinterpret_cast<uintptr_t>(streamer);
+ if(rplsNative && !rplsFirst)++rplsRuntimeNativeDepth;
  FunctionCast(wrapTGLHostSubmit,callbackXE->orgTGLHostSubmit)(streamer,flags);
+ if(rplsNative)--rplsRuntimeNativeDepth;
+ if(rplsFirst)rplsRuntimeState.returned();
  if(renderWakeOwner)tglSubmitHistoryRecord(renderWakeOwner,streamer,n,1);
  adlnQueueTraceSubmitFinish(queueTraceMask,renderWakeOwner);
  if(executionSlot!=UINT32_MAX) {
   tglExecutionSample(executionSlot+1,renderWakeOwner,1,1,reinterpret_cast<uintptr_t>(streamer),
    n,tglHost.submit[n].q[5]?tglHost.submit[n].q[5]:tglHost.submit[n].q[6]);
   if(executionSlot==2)__atomic_store_n(&tglExecutionSubmitted,1U,__ATOMIC_RELEASE);
+ }
+ if(rplsFirst) {
+  tglExecutionSample(3,renderWakeOwner,1,1,tglExecutionStreamer,n,tglExecutionDescriptor,false,true);
  }
 
  if (n<arrsize(tglHost.submit)) {
@@ -16867,6 +16970,37 @@ void XE::wrapTGLHostSubmit(void *streamer,uint32_t flags) {
 
 void XE::wrapAlderLakeNExecutionWake(void *owner,bool enable,unsigned domains,unsigned client) {
  FunctionCast(wrapAlderLakeNExecutionWake,callbackXE->orgAlderLakeNExecutionWake)(owner,enable,domains,client);
+ if(rplsMemoryAdmitted) {
+  // The just-returned native call owns this client's lease. Do not borrow an
+  // ACK from another thread or collect any startup samples for RPL-S.
+  if(!rplsRuntimeReady || !enable || !(domains&5) || client>15 || owner!=tglHost.owner)return;
+  const auto phase=__atomic_load_n(&rplsRuntimeState.phase,__ATOMIC_ACQUIRE);
+  if(phase!=2 && phase!=3)return;
+  const auto start=__atomic_load_n(&tglExecutionStart,__ATOMIC_ACQUIRE);
+  uint64_t now;tglHostClock(&now);if(!start || now<start)return;
+  if(domains&4) {
+   // Slot0 belongs to the selected native-submit interval, not necessarily
+   // pre-SQ. Its timestamp can be compared with the retained pre-SQ bracket.
+   if(phase==2) {
+    if(rplsRuntimeThread==reinterpret_cast<uintptr_t>(current_thread()) && rplsRuntimeNativeDepth==1)
+     tglFaultSample(0,static_cast<uint8_t *>(owner),client,true);
+   } else {
+    const uint64_t faultDelays[] {0,10000000,1000000000,5000000000};
+    for(unsigned i=0;i<arrsize(faultDelays);++i)if(now-start>=faultDelays[i] &&
+       !__atomic_load_n(&tglFault[1+i].ready,__ATOMIC_ACQUIRE)) {
+     tglFaultSample(1+i,static_cast<uint8_t *>(owner),client,true);break;
+    }
+   }
+  }
+  if(phase!=3 || !(domains&1))return;
+  const uint64_t delays[] {0,1000000,10000000,100000000,1000000000,5000000000};
+  for(unsigned i=0;i<arrsize(delays);++i)if(now-start>=delays[i] &&
+     !__atomic_load_n(&tglExecution[4+i].ready,__ATOMIC_ACQUIRE)) {
+   tglExecutionSample(4+i,static_cast<uint8_t *>(owner),domains,client,
+    tglExecutionStreamer,tglExecutionSubmit,tglExecutionDescriptor,false,true);break;
+  }
+  return;
+ }
  if(!callbackXE->adlnDetected || !enable || owner!=tglHost.owner)return;
  if(domains&4) {
   if(!__atomic_load_n(&tglExecutionStart,__ATOMIC_ACQUIRE))tglFaultSample(0,static_cast<uint8_t *>(owner),client);
