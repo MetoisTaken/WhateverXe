@@ -100,8 +100,15 @@ static void eventTests() {
 	check(2, 2, true, 0, Kind::NewQueueComplete, 0, 1);
 	check(2, 2, false, 0, Kind::ElementComplete, 0, 1);
 	check(2, 2, true, 0, Kind::NewQueueComplete, 63, 0);
-	// Captured r82 event3: keep an explicit invalid classification. No bypass.
-	assert(classify(0x0001000000010000ULL).kind == Kind::Invalid);
+	// Captured r82 event3 and RPL-S r113: the same context in both ELSP
+	// elements completes element 0 without a new queue. It is an element
+	// completion with the element-switch flag and without lite restore.
+	assert(classify(0x0001000000010000ULL).kind == Kind::ElementComplete);
+	assert(classify(0x0002800000028000ULL).kind == Kind::ElementComplete);
+	assert(legacyEntry(classify(0x0002800000028000ULL)).flags == 0x14);
+	assert(legacyEntry(classify((0x00028000ULL << 32) | 0x00028001)).flags & 0x8000);
+	check(2, 2, false, 0, Kind::ElementComplete);
+	for (unsigned detail = 1; detail <= 15; ++detail) check(2, 2, false, detail, Kind::Invalid);
 	for (unsigned detail = 6; detail <= 15; ++detail) {
 		check(1, 2, false, detail, Kind::Invalid);
 		check(1, idle, true, detail, Kind::Invalid);
@@ -137,14 +144,14 @@ int main(int argc, char **argv) {
 	}
 	assert(handlerFor(classify(0x0000800503FF8000ULL)) == Handler::IncompleteToIdle);
 	assert(handlerFor(classify(0x03FF800003FF8001ULL)) == Handler::IdlePreempt);
-	assert(handlerFor(classify(0x0001000000010000ULL)) == Handler::Invalid);
+	assert(handlerFor(classify(0x0001000000010000ULL)) == Handler::ElementSwitch);
 	for (unsigned detail = 1; detail <= 4; ++detail) {
 		assert(handlerFor(classify((static_cast<uint64_t>(0x8000 | detail) << 32) | 0x10000))
 			== Handler::IncompleteElementSwitch);
 	}
 	// Feed the historical sequence through intake and classification together.
-	// Event3's unexplained same-submission transition must not be skipped or
-	// promoted into a made-up lite restore; event4 remains undispatched.
+	// Event3 is the element-0 completion of a context submitted in both ELSP
+	// elements; it is dispatched in order and event4 then goes idle.
 	{
 		State state; IO io; fresh(state, io); io.tail = 4;
 		const uint64_t sequence[] {0x03FF800000008001ULL, 0x0000800003FF8000ULL,
@@ -155,10 +162,9 @@ int main(int argc, char **argv) {
 			if (classify(sample.raw).kind == Kind::Invalid) { ++rejected; return false; }
 			++accepted; return true;
 		};
-		assert(drain(state, io, accept) == Error::Rejected);
-		assert(accepted == 3 && rejected == 1 && state.head == 3);
-		assert(io.slots[4] == sequence[4]);
-		assert(drain(state, io, accept) == Error::Rejected && rejected == 1);
+		assert(drain(state, io, accept) == Error::None);
+		assert(accepted == 5 && rejected == 0 && state.head == 4);
+		for (unsigned i = 0; i < 5; ++i) assert(io.slots[i] == Sentinel);
 	}
 	// Independent expected modular order for every valid head/tail combination.
 	for (unsigned head = 0; head < 12; ++head) {
@@ -253,5 +259,5 @@ int main(int argc, char **argv) {
 		State state; IO io; Consumer accept {io};
 		assert(drain(state, io, accept) == Error::NotInitialized && io.tailReads == 0);
 	}
-	puts("CSB intake and PRM event classification passed, including r82 rejection without replay");
+	puts("CSB intake and PRM event classification passed, including same-context element completion");
 }
