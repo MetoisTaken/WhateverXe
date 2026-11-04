@@ -44,6 +44,7 @@
 #include "kern_framebuffer_training_native.hpp"
 #include "kern_tgl_gmbus.hpp"
 #include "kern_hdmi_link.hpp"
+#include "kern_mps_intel.hpp"
 #include "kern_alderlake_n_gpu.hpp"
 #include "kern_display13_fb_memory.hpp"
 #include "kern_display13_handoff.hpp"
@@ -332,6 +333,104 @@ bool tglRecoverySerialize(void *,void *,OSSerialize *serializer) {
 	auto out=OSData::withBytes(data,sizeof(data));if (!out) return false;
 	const bool ok=out->serialize(serializer);out->release();return ok;
 }
+}
+
+namespace {
+struct MPSIntelState {
+	using TaskInfo=int (*)(void *,int,void *,uint32_t *);
+	using CopyIn=int (*)(uint64_t,void *,size_t);
+	using CurrentTask=void *(*)();
+	using TaskPmap=void *(*)(void *);
+	using FindPhys=uint32_t (*)(void *,uint64_t);
+	using PhysWrite=void (*)(uint64_t,uint32_t);
+	TaskInfo taskInfo {};CopyIn copyIn {};CurrentTask currentTask {};
+	TaskPmap taskPmap {};FindPhys findPhys {};PhysWrite physWrite {};
+	uint64_t textStart {},textEnd {},site {};
+	uint32_t opens {},patches {},verified {},failures {},busy {};
+	bool mapRead {},mapFailed {};
+};
+MPSIntelState mpsIntel;
+
+bool mpsIntelSerialize(void *,void *,OSSerialize *serializer) {
+	auto &m=mpsIntel;
+	uint64_t v[8] {m.textStart,m.textEnd,m.site,m.opens,m.patches,m.verified,m.failures,static_cast<uint64_t>(m.mapRead)|(static_cast<uint64_t>(m.mapFailed)<<1)};
+	auto data=OSData::withBytes(v,sizeof(v));if(!data)return false;
+	const bool ok=data->serialize(serializer);data->release();return ok;
+}
+
+// Runs in the opening task; no MMIO, no waits. Every step is verified and a
+// mismatch leaves MPSCore untouched.
+void mpsIntelApply(void *task) {
+	auto &m=mpsIntel;
+	if (__atomic_exchange_n(&m.busy,1U,__ATOMIC_ACQUIRE)) return;
+	__atomic_add_fetch(&m.opens,1,__ATOMIC_RELAXED);
+	do {
+		if (!task || m.currentTask()!=task) break;
+		// Only user tasks have dyld info; the kernel GPU task is created at boot.
+		struct {uint64_t addr,size;int32_t format;} __attribute__((packed)) dyld {};
+		uint32_t count=5; // TASK_DYLD_INFO_COUNT
+		if (m.taskInfo(task,17,&dyld,&count) || !dyld.addr) break;
+		if (!m.mapRead && !m.mapFailed) {
+			size_t size=0;
+			auto map=FileIO::readFileToBuffer(MPSIntel::MapPath,size);
+			if (map) {
+				m.mapRead=MPSIntel::textRange(reinterpret_cast<const char *>(map),size,m.textStart,m.textEnd);
+				Buffer::deleter(map);
+			}
+			if (!m.mapRead) m.mapFailed=true;
+		}
+		if (!m.mapRead) break;
+		if (!m.site) {
+			uint64_t slide=0;
+			if (m.copyIn(dyld.addr+MPSIntel::SharedCacheSlideOffset,&slide,sizeof(slide))) break;
+			const uint64_t start=m.textStart+slide,end=m.textEnd+slide;
+			static uint8_t chunk[65536+sizeof(MPSIntel::Find)];
+			uint64_t found=0;uint32_t hits=0;
+			for (uint64_t a=start;a<end;a+=65536) {
+				const uint64_t len=(end-a)<sizeof(chunk) ? end-a : sizeof(chunk);
+				if (len<sizeof(MPSIntel::Find) || m.copyIn(a,chunk,len)) break;
+				for (uint64_t k=0;k+sizeof(MPSIntel::Find)<=len && k<65536;++k)
+					if (chunk[k]==0xB8 && !memcmp(chunk+k,MPSIntel::Find,sizeof(MPSIntel::Find))) {found=a+k;++hits;}
+				// An already patched page (another boot path) still matches here only if unpatched.
+			}
+			if (hits!=1) {
+				// Accept an already patched site as the unique location.
+				uint8_t probe[sizeof(MPSIntel::Find)];memcpy(probe,MPSIntel::Find,sizeof(probe));
+				memcpy(probe+MPSIntel::JumpOffset,MPSIntel::Patched,2);
+				hits=0;
+				for (uint64_t a=start;a<end;a+=65536) {
+					const uint64_t len=(end-a)<sizeof(chunk) ? end-a : sizeof(chunk);
+					if (len<sizeof(probe) || m.copyIn(a,chunk,len)) break;
+					for (uint64_t k=0;k+sizeof(probe)<=len && k<65536;++k)
+						if (chunk[k]==0xB8 && !memcmp(chunk+k,probe,sizeof(probe))) {found=a+k;++hits;}
+				}
+				if (hits!=1) {__atomic_add_fetch(&m.failures,1,__ATOMIC_RELAXED);break;}
+			}
+			m.site=found;
+		}
+		const uint64_t va=m.site+MPSIntel::JumpOffset;
+		uint8_t now[2] {};
+		if (m.copyIn(va,now,2)) break; // also faults the page in
+		if (!memcmp(now,MPSIntel::Patched,2)) {__atomic_add_fetch(&m.verified,1,__ATOMIC_RELAXED);break;}
+		if (memcmp(now,MPSIntel::Original,2)) {__atomic_add_fetch(&m.failures,1,__ATOMIC_RELAXED);break;}
+		auto pmap=m.taskPmap(task);
+		const uint32_t p0=pmap ? m.findPhys(pmap,va) : 0,p1=pmap ? m.findPhys(pmap,va+1) : 0;
+		if (!p0 || !p1) {__atomic_add_fetch(&m.failures,1,__ATOMIC_RELAXED);break;}
+		m.physWrite((static_cast<uint64_t>(p0)<<12)|(va&0xFFF),MPSIntel::Patched[0]);
+		m.physWrite((static_cast<uint64_t>(p1)<<12)|((va+1)&0xFFF),MPSIntel::Patched[1]);
+		if (!m.copyIn(va,now,2) && !memcmp(now,MPSIntel::Patched,2)) __atomic_add_fetch(&m.patches,1,__ATOMIC_RELAXED);
+		else __atomic_add_fetch(&m.failures,1,__ATOMIC_RELAXED);
+	} while (false);
+	__atomic_store_n(&m.busy,0U,__ATOMIC_RELEASE);
+}
+}
+
+// IGAccelTask::initWithOptions runs on the thread of the process that first
+// uses the accelerator (IntelAccelerator::createUserGPUTask).
+bool XE::wrapMPSIntelTask(void *task,void *accelerator) {
+	const bool ok=FunctionCast(wrapMPSIntelTask,callbackXE->orgMPSIntelTask)(task,accelerator);
+	if (ok && mpsIntel.currentTask) mpsIntelApply(mpsIntel.currentTask());
+	return ok;
 }
 
 void XE::wrapTGLRecovery(void *channel) {
@@ -13056,6 +13155,27 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					!memcmp(reinterpret_cast<void *>(address+0x4CAD1),successPath,sizeof(successPath)) &&
 					!memcmp(reinterpret_cast<void *>(submit),submitHead,sizeof(submitHead));
 				patcher.clearError();
+				if (recoveryOK && !checkKernelArgument("-wex-mps-intel-off") && !MPSIntel::cpuHasSGX()) {
+					auto &m=mpsIntel;
+					m.taskInfo=reinterpret_cast<MPSIntelState::TaskInfo>(patcher.solveSymbol(KernelPatcher::KernelID,"_task_info"));
+					m.copyIn=reinterpret_cast<MPSIntelState::CopyIn>(patcher.solveSymbol(KernelPatcher::KernelID,"_copyin"));
+					m.currentTask=reinterpret_cast<MPSIntelState::CurrentTask>(patcher.solveSymbol(KernelPatcher::KernelID,"_current_task"));
+					m.taskPmap=reinterpret_cast<MPSIntelState::TaskPmap>(patcher.solveSymbol(KernelPatcher::KernelID,"_get_task_pmap"));
+					m.findPhys=reinterpret_cast<MPSIntelState::FindPhys>(patcher.solveSymbol(KernelPatcher::KernelID,"_pmap_find_phys"));
+					m.physWrite=reinterpret_cast<MPSIntelState::PhysWrite>(patcher.solveSymbol(KernelPatcher::KernelID,"_ml_phys_write_byte_64"));
+					patcher.clearError();
+					bool mpsOK=m.taskInfo && m.copyIn && m.currentTask && m.taskPmap && m.findPhys && m.physWrite &&
+						patcher.solveSymbol<mach_vm_address_t>(index,"__ZN11IGAccelTask15initWithOptionsEP16IntelAccelerator",address,size)==address+0x788C;
+					patcher.clearError();
+					if (mpsOK) {
+						KernelPatcher::RouteRequest shared {"__ZN11IGAccelTask15initWithOptionsEP16IntelAccelerator",wrapMPSIntelTask,orgMPSIntelTask};
+						mpsOK=patcher.routeMultiple(index,&shared,1,address,size);patcher.clearError();
+					}
+					IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSIntelFixReady",mpsOK);
+					if (mpsOK) if (auto st=OSSerializer::forTarget(nullptr,mpsIntelSerialize)) {
+						IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSIntelFix",st);st->release();
+					}
+				}
 				if (recoveryOK) {
 					// The native poll loses GDRST bits above bit 7 and can wait
 					// indefinitely. Preserve its exact entry/continuations, including
