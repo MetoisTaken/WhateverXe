@@ -158,5 +158,6 @@
   "-wex-rpls-hang-dump": [],
   "-wex-hdmi-legacy-link": [],
   "-wex-noboot-seed": [],
-  "-wex-mps-intel-off": []
+  "-wex-mps-intel-off": [],
+  "-wex-preempt-prio0": []
 }

@@ -16693,6 +16693,23 @@ bool XE::installTGLCSB12(KernelPatcher &patcher,size_t index,mach_vm_address_t a
  if (ok) {
   auto data=OSSerializer::forTarget(nullptr,tglCSBSerialize);
   if (data) {root->setProperty("TGLCSB12Live",data);data->release();}
+  if(checkKernelArgument("-wex-preempt-prio0")) {
+   // schedDispatch disallows preemption whenever the running context has
+   // hardware priority 0, the level default Metal queues map to, so a long
+   // Metal dispatch starves WindowServer until the GPU progress watchdog
+   // fires. Opt-in until hang recovery drops the guilty batch.
+   const uint8_t find[] {0x48,0x8B,0x08,0x80,0x79,0x78,0x00,0x74,0x06,0xF6,0x40,0x1C,0x40,0x74,0x0C};
+   const uint8_t repl[] {0x48,0x8B,0x08,0x80,0x79,0x78,0x00,0x90,0x90,0xF6,0x40,0x1C,0x40,0x74,0x0C};
+   auto site=reinterpret_cast<uint8_t *>(address+0x3B11F);
+   bool done=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN26IGHardwareCommandStreamer513schedDispatchEj",address,size)==address+0x3B084 &&
+    !memcmp(site,find,sizeof(find));patcher.clearError();
+   if(done) {
+    KernelPatcher::LookupPatch patch {currentGraphics,find,repl,sizeof(find),1};
+    patcher.applyLookupPatch(&patch,site,sizeof(find)+1);
+    done=patcher.getError()==KernelPatcher::Error::NoError && !memcmp(site,repl,sizeof(repl));patcher.clearError();
+   }
+   root->setProperty("WEXPreemptPrio0",done);
+  }
   auto modes=OSSerializer::forTarget(nullptr,tglCSBModeSerialize);
   if (modes) {root->setProperty("TGLCSBModeAtInit",modes);modes->release();}
  }
