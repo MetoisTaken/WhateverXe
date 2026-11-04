@@ -28,6 +28,8 @@ FUNCTION
 #define FunctionCast(name,target) (target)
 constexpr uint32_t kIOReturnNotReady=0xe00002d8U;
 template<class... A> void tglTrace(A...){}
+void adlsHDMILinkBeforeEnable(void *){}
+void adlsHDMILinkAfterEnable(void *,uint32_t){}
 void tglSnapshotTransmitter(void*,bool,unsigned){}
 ENABLE
 int main(){

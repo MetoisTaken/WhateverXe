@@ -43,6 +43,7 @@
 #include "kern_display13_tc_dp.hpp"
 #include "kern_framebuffer_training_native.hpp"
 #include "kern_tgl_gmbus.hpp"
+#include "kern_hdmi_link.hpp"
 #include "kern_alderlake_n_gpu.hpp"
 #include "kern_display13_fb_memory.hpp"
 #include "kern_display13_handoff.hpp"
@@ -13885,6 +13886,34 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
                 adlsPortWriteFn=adlsDonorSymbol(patcher,index,address,size,"__ZN14AppleIntelPort15writeRegister32Ejj",0x1FEA8);
                 IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMISwingReady",adlsPortReadFn && adlsPortWriteFn);
             }
+            if(adlsDisplaySelected && !checkKernelArgument("-wex-hdmi-legacy-link")) {
+                // The donor caps native HDMI at 300 MHz, never scales the TMDS clock
+                // for deep colour and has no SCDC scrambling. All three routes or none.
+                static const uint8_t onlineEntry[]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xEC};
+                static const uint8_t clocksEntry[]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50};
+                static const uint8_t pllEntry[]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x49,0x89,0xD7};
+                // Native HDMI maximum pixel clock store in getOnlineInfo.
+                static const uint8_t capStore[]={0x48,0xC7,0x83,0x68,0x43,0x00,0x00,0x00,0xA3,0xE1,0x11};
+                const bool known=adlsPortReadFn && adlsPortWriteFn && size>0x6C9B0 &&
+                    !memcmp(reinterpret_cast<void *>(address+0x2E779),capStore,sizeof(capStore)) &&
+                    adlsDonorSymbol(patcher,index,address,size,"__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_",
+                        0x2E232,onlineEntry,sizeof(onlineEntry)) &&
+                    adlsDonorSymbol(patcher,index,address,size,"__ZN31AppleIntelFramebufferController11setupClocksEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",
+                        0x6C6D6,clocksEntry,sizeof(clocksEntry)) &&
+                    adlsDonorSymbol(patcher,index,address,size,"__ZN31AppleIntelFramebufferController20calculatePllDivisorsEjP21AppleIntelDisplayPath",
+                        0x6C9A0,pllEntry,sizeof(pllEntry));
+                if(known) {
+                    KernelPatcher::RouteRequest routes[]={
+                        {"__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_",wrapADLSOnlineInfo,orgADLSOnlineInfo},
+                        {"__ZN31AppleIntelFramebufferController11setupClocksEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",
+                            wrapADLSSetupClocks,orgADLSSetupClocks},
+                        {"__ZN31AppleIntelFramebufferController20calculatePllDivisorsEjP21AppleIntelDisplayPath",wrapADLSPllDivisors,orgADLSPllDivisors}
+                    };
+                    adlsHDMILinkReady=patcher.routeMultiple(index,routes,arrsize(routes),address,size);
+                    patcher.clearError();
+                }
+                IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMILinkReady",adlsHDMILinkReady);
+            }
 			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN17AppleIntelPortHAL14enableComboPhyEv", wrapTGLEnableCombo, orgTGLEnableCombo},
@@ -18971,6 +19000,7 @@ uint32_t XE::wrapTGLGMBus(void *controller, uint32_t bus, uint32_t speed, void *
 	set(7,3);
 	const auto result = FunctionCast(wrapTGLGMBus, callbackXE->orgTGLGMBus)(controller, bus, speed, request);
 	finish(true,result);
+	adlsHDMINoteDDC(controller, bus, request);
 	if (observation) {
 		r[19] = observation->reads; r[20] = observation->first; r[21] = observation->last;
 		r[22] = observation->combined; r[23] = observation->firstError;
@@ -20521,6 +20551,161 @@ void XE::wrapADLSInitHDCP(void *path) {
     FunctionCast(wrapADLSInitHDCP,self->orgADLSInitHDCP)(path);
 }
 
+// Native HDMI link: sink capabilities come from EDID reads observed on the DDC
+// bus, the plan from the mode programmed through setupClocks. One plan per port.
+static HDMILink::Sink adlsHDMISinks[32];
+struct ADLSHDMILinkState {
+    void *port {};
+    uint64_t pixelHz {};
+    HDMILink::Plan plan {};
+};
+static ADLSHDMILinkState adlsHDMIPending,adlsHDMIActive;
+
+uint32_t *XE::adlsHDMIBoundConfig(void *port) {
+    auto self=callbackXE;
+    auto b=static_cast<uint8_t *>(port);
+    auto config=b ? *reinterpret_cast<uint32_t **>(b+0x548) : nullptr;
+    if(!self->adlsHDMILinkReady || !config || config[2]!=2 || config[0]>=XELP::PortCount ||
+       !self->adlsWiring.matches(config,false) || !self->adlsWiring.bound(self->tglPlatformCopy,config) ||
+       self->adlsWiring.pin[config[0]]>=32)return nullptr;
+    return config;
+}
+
+void XE::adlsHDMINoteDDC(void *controller,uint32_t bus,void *request) {
+    auto self=callbackXE;
+    auto r=static_cast<uint8_t *>(request);
+    if(!self->adlsHDMILinkReady || !r || bus>=32 || !self->tglHDMIDDCEligible(bus) || *reinterpret_cast<uint32_t *>(r+0x1C) ||
+       *reinterpret_cast<uint32_t *>(r+0x0C)!=0xA0 || *reinterpret_cast<uint32_t *>(r+0x38)!=128)return;
+    auto block=*reinterpret_cast<uint8_t **>(r+0x4C);
+    if(!block)return;
+    if(!HDMILink::isBaseBlock(block)) {HDMILink::parseCTA(block,adlsHDMISinks[bus]);return;}
+    // A new base block starts a new sink. Read its first extension now so the
+    // base block handed to the OS can already state the sink's colour depth.
+    adlsHDMISinks[bus]={};
+    if(!block[126] || r[0x11] || !self->orgTGLGMBus)return;
+    uint8_t extension[128] {},query[0x7C];
+    memcpy(query,r,sizeof(query));
+    query[0x11]=0x80;
+    *reinterpret_cast<uint32_t *>(query+0x1C)=0;
+    *reinterpret_cast<uint8_t **>(query+0x4C)=extension;
+    if(FunctionCast(wrapTGLGMBus,self->orgTGLGMBus)(controller,bus,0,query) || *reinterpret_cast<uint32_t *>(query+0x1C))return;
+    HDMILink::parseCTA(extension,adlsHDMISinks[bus]);
+    if(HDMILink::upgradeBaseDepth(block,adlsHDMISinks[bus])) {
+        static uint32_t count {};
+        uint32_t record[]={bus,adlsHDMISinks[bus].maxTMDSKHz,adlsHDMISinks[bus].scdc,__atomic_add_fetch(&count,1,__ATOMIC_RELAXED)};
+        IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMIDepthEDID",record,sizeof(record));
+    }
+}
+
+void XE::wrapADLSOnlineInfo(void *framebuffer,void *path,uint8_t *a,uint8_t *b) {
+    auto self=callbackXE;
+    FunctionCast(wrapADLSOnlineInfo,self->orgADLSOnlineInfo)(framebuffer,path,a,b);
+    auto p=static_cast<uint8_t *>(path);
+    auto config=p ? adlsHDMIBoundConfig(*reinterpret_cast<void **>(p+0x3648)) : nullptr;
+    auto maximum=framebuffer ? reinterpret_cast<uint64_t *>(static_cast<uint8_t *>(framebuffer)+0x4368) : nullptr;
+    if(!config || !maximum || *maximum!=300000000ULL)return;
+    const auto limit=adlsHDMISinks[self->adlsWiring.pin[config[0]]].linkMaxKHz();
+    if(limit>300000)*maximum=uint64_t(limit)*1000;
+    uint64_t record[]={config[0],self->adlsWiring.pin[config[0]],limit,*maximum};
+    IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMIPixelLimit",record,sizeof(record));
+}
+
+void XE::wrapADLSSetupClocks(void *controller,void *framebuffer,void *path,const void *timing) {
+    auto self=callbackXE;
+    auto fb=static_cast<uint8_t *>(framebuffer);
+    auto p=static_cast<uint8_t *>(path);
+    auto port=p ? *reinterpret_cast<void **>(p+0x3648) : nullptr;
+    auto config=adlsHDMIBoundConfig(port);
+    adlsHDMIPending={};
+    if(config && fb && timing) {
+        auto bpp=reinterpret_cast<uint32_t *>(fb+0x44F8),encoder=reinterpret_cast<uint32_t *>(fb+0x44FC);
+        const auto pixelHz=*reinterpret_cast<const uint64_t *>(static_cast<const uint8_t *>(timing)+0x28);
+        const auto plan=HDMILink::plan(adlsHDMISinks[self->adlsWiring.pin[config[0]]],pixelHz,*bpp);
+        // SetupParams programs transcoder and pipe depth from these fields after us.
+        if(plan.clamped) {*bpp=24;*encoder=0;}
+        adlsHDMIPending={port,pixelHz,plan};
+    }
+    FunctionCast(wrapADLSSetupClocks,self->orgADLSSetupClocks)(controller,framebuffer,path,timing);
+    if(adlsHDMIPending.port)adlsHDMIActive=adlsHDMIPending;
+    adlsHDMIPending={};
+}
+
+void XE::wrapADLSPllDivisors(void *controller,uint32_t pixelHz,void *path) {
+    auto &link=adlsHDMIPending;
+    auto p=static_cast<uint8_t *>(path);
+    // HDMI deep colour runs the TMDS clock at pixel rate x bpp/24.
+    if(link.port && p && *reinterpret_cast<void **>(p+0x3648)==link.port && link.pixelHz/1000==pixelHz/1000 &&
+       uint64_t(link.plan.tmdsKHz)*1000<=UINT32_MAX)pixelHz=link.plan.tmdsKHz*1000U;
+    FunctionCast(wrapADLSPllDivisors,callbackXE->orgADLSPllDivisors)(controller,pixelHz,path);
+}
+
+// Transcoder driving this DDI: enabled TRANS_DDI_FUNC_CTL selecting DDI+1.
+int XE::adlsHDMITranscoder(void *port,uint32_t ddi) {
+    auto read=reinterpret_cast<uint32_t (*)(void *,uint32_t)>(callbackXE->adlsPortReadFn);
+    for(int t=0;t<4;++t) {
+        const auto v=read(port,0x60400+0x1000U*static_cast<uint32_t>(t));
+        if((v&0x80000000U) && ((v>>27)&0xF)==ddi+1)return t;
+    }
+    return -1;
+}
+
+void XE::adlsHDMILinkBeforeEnable(void *port) {
+    auto self=callbackXE;
+    auto config=adlsHDMIBoundConfig(port);
+    auto &link=adlsHDMIActive;
+    if(!config || link.port!=port)return;
+    auto read=reinterpret_cast<uint32_t (*)(void *,uint32_t)>(self->adlsPortReadFn);
+    auto write=reinterpret_cast<void (*)(void *,uint32_t,uint32_t)>(self->adlsPortWriteFn);
+    const auto bus=self->adlsWiring.pin[config[0]];
+    uint32_t record[8]={config[0],link.plan.bitsPerPixel,link.plan.tmdsKHz,link.plan.scrambling,UINT32_MAX,UINT32_MAX,UINT32_MAX,0};
+    // Set or clear the sink's scrambling before the link starts.
+    if(adlsHDMISinks[bus].scdc && self->orgTGLGMBus && self->tglObservationController) {
+        uint8_t value=HDMILink::scdcConfig(link.plan),readback=0xFF;
+        uint8_t request[0x7C] {};
+        *reinterpret_cast<uint32_t *>(request)=1;          // simple send
+        *reinterpret_cast<uint32_t *>(request+0x08)=0xA8;  // SCDC
+        request[0x10]=0x20;                                  // TMDS_Config
+        *reinterpret_cast<uint32_t *>(request+0x20)=2;     // use sub-address
+        *reinterpret_cast<uint32_t *>(request+0x28)=1;
+        *reinterpret_cast<uint8_t **>(request+0x44)=&value;
+        record[4]=FunctionCast(wrapTGLGMBus,self->orgTGLGMBus)(self->tglObservationController,bus,0,request);
+        uint8_t query[0x7C] {};
+        *reinterpret_cast<uint32_t *>(query+0x04)=1;       // simple reply
+        *reinterpret_cast<uint32_t *>(query+0x0C)=0xA8;
+        query[0x11]=0x20;
+        *reinterpret_cast<uint32_t *>(query+0x20)=2;
+        *reinterpret_cast<uint32_t *>(query+0x38)=1;
+        *reinterpret_cast<uint8_t **>(query+0x4C)=&readback;
+        if(!FunctionCast(wrapTGLGMBus,self->orgTGLGMBus)(self->tglObservationController,bus,0,query))record[5]=readback;
+    }
+    const auto t=adlsHDMITranscoder(port,config[0]);
+    if(t>=0) {
+        auto v=read(port,0x60400+0x1000U*static_cast<uint32_t>(t))&~HDMILink::TranscoderScramblingBits;
+        if(link.plan.scrambling)v|=HDMILink::TranscoderScramblingBits;
+        write(port,0x60400+0x1000U*static_cast<uint32_t>(t),v);
+        record[6]=read(port,0x60400+0x1000U*static_cast<uint32_t>(t));
+    }
+    static uint32_t count {};record[7]=__atomic_add_fetch(&count,1,__ATOMIC_RELAXED);
+    IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMILink",record,sizeof(record));
+}
+
+void XE::adlsHDMILinkAfterEnable(void *port,uint32_t result) {
+    auto self=callbackXE;
+    auto config=adlsHDMIBoundConfig(port);
+    if(result || !config || adlsHDMIActive.port!=port)return;
+    const auto t=adlsHDMITranscoder(port,config[0]);
+    if(t<0)return;
+    auto read=reinterpret_cast<uint32_t (*)(void *,uint32_t)>(self->adlsPortReadFn);
+    auto write=reinterpret_cast<void (*)(void *,uint32_t,uint32_t)>(self->adlsPortWriteFn);
+    // Deep colour must be announced in the General Control Packet.
+    const bool deep=adlsHDMIActive.plan.bitsPerPixel>24;
+    write(port,0x60210+0x1000U*static_cast<uint32_t>(t),deep ? HDMILink::GCPColourIndication : 0);
+    auto dip=read(port,0x60200+0x1000U*static_cast<uint32_t>(t));
+    write(port,0x60200+0x1000U*static_cast<uint32_t>(t),deep ? dip|HDMILink::DIPEnableGCP : dip&~HDMILink::DIPEnableGCP);
+    uint32_t record[]={static_cast<uint32_t>(t),read(port,0x60200+0x1000U*static_cast<uint32_t>(t)),read(port,0x60210+0x1000U*static_cast<uint32_t>(t))};
+    IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMIGCP",record,sizeof(record));
+}
+
 // Read-only live display snapshot for diagnostics: no writes, no power references.
 static void *adlsLiveAccess;
 static uint32_t (*adlsLiveRead)(void *,unsigned long);
@@ -21892,7 +22077,9 @@ uint32_t XE::wrapTGLEnablePort(void *port) {
         tglTrace(21,id,true,kIOReturnNotReady,0,kIOReturnNotReady,0);
         return kIOReturnNotReady;
     }
+	adlsHDMILinkBeforeEnable(port);
 	const auto original = FunctionCast(wrapTGLEnablePort, callbackXE->orgTGLEnablePort)(port);
+	adlsHDMILinkAfterEnable(port, original);
 	if(original)tglComboAUXReference(port,false); // only releases if buffer stayed off
 	auto r = original;
 	// Activation waiting is installed once in the native donor loop.

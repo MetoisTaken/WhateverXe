@@ -157,6 +157,16 @@ private:
     static void wrapADLSInitHDCP(void *path);
     mach_vm_address_t adlsPortReadFn {},adlsPortWriteFn {};
     static uint32_t adlsHDMISwingOverride(void *port,uint32_t result);
+    bool adlsHDMILinkReady {};
+    mach_vm_address_t orgADLSOnlineInfo {},orgADLSSetupClocks {},orgADLSPllDivisors {};
+    static void wrapADLSOnlineInfo(void *framebuffer,void *path,uint8_t *a,uint8_t *b);
+    static void wrapADLSSetupClocks(void *controller,void *framebuffer,void *path,const void *timing);
+    static void wrapADLSPllDivisors(void *controller,uint32_t pixelHz,void *path);
+    static void adlsHDMINoteDDC(void *controller,uint32_t bus,void *request);
+    static uint32_t *adlsHDMIBoundConfig(void *port);
+    static int adlsHDMITranscoder(void *port,uint32_t ddi);
+    static void adlsHDMILinkBeforeEnable(void *port);
+    static void adlsHDMILinkAfterEnable(void *port,uint32_t result);
     mach_vm_address_t orgRPLSHangDump {};
     static void wrapRPLSHangDump(void *ring);
     static uint32_t tglSignalLevelsBody(void *port, uint32_t swing, uint32_t emphasis, void *overrideConfig);

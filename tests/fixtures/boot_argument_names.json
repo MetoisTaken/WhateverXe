@@ -156,5 +156,6 @@
   "-wex-hdmi-hdcp": [],
   "-wex-native-hdmi-swing": [],
   "-wex-rpls-hang-dump": [],
+  "-wex-hdmi-legacy-link": [],
   "-wex-noboot-seed": []
 }

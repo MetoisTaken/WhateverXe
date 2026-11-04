@@ -40,6 +40,7 @@ struct XE {
  static void tglBeginTCColdProtection(void*){}
  static bool wrapTGLGetOSInformation(void *);
  static uint32_t wrapTGLGMBus(void *,uint32_t,uint32_t,void *);
+ static void adlsHDMINoteDDC(void *,uint32_t,void *) {}
  static bool wrapFramebufferComputeLanes(void *,const void *,uint32_t,uint32_t,uint32_t *);
  bool display13FramebufferRequested=false;
  bool framebufferHDMIEligible(const uint32_t *) const;
