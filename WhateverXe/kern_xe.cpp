@@ -433,8 +433,10 @@ bool XE::wrapMPSIntelTask(void *task,void *accelerator) {
 	return ok;
 }
 
+namespace { void tglResetDiagBefore(void *channel); }
 void XE::wrapTGLRecovery(void *channel) {
 	const auto n=__atomic_fetch_add(&tglRecoveryCalls,1,__ATOMIC_RELAXED);
+	tglResetDiagBefore(channel);
 	uint64_t before {};clock_get_uptime(&before);
 	const auto result=TGLRecovery::resetAndResume(channel,tglRecoveryStamp);
 	uint64_t after {};clock_get_uptime(&after);
@@ -16240,6 +16242,12 @@ struct TGLCSBEngine {
  bool hardwareReady {false};
  uint64_t consumed {}, retries {}, fallback {}, resets {}, lastRaw {};
  uint32_t modeAtInit {UINT32_MAX};
+ // Engine setup that startGraphicsEngine programs once (status page, execlist
+ // mode, error mask). A host-scheduler engine reset (GDRST) clears it and the
+ // donor's reset register list does not restore it, so the engine never runs
+ // the replayed stamp and IOAccel restarts the channel forever.
+ uint32_t setup[3] {}, restored {};
+ bool setupValid {false};
 // Exact donor kIGHwCsDesc has six 0x79-byte records, IDs0..5. The scheduler's
 // `index > 4` exit is AFTER construction, so it also constructs ID5.
 } tglCSBEngines[6];
@@ -16582,8 +16590,113 @@ struct TGLCSBIO {
  }
 };
 
+// kIGHwCsDesc offsets: +0x35 HWS_PGA, +0x39 GFX_MODE (masked), +0x45 EMR.
+static constexpr uint32_t tglEngineSetupDesc[3] {0x35,0x39,0x45};
+uint32_t tglEngineSetupRestores {};
+
+static void tglEngineSetupCapture(TGLCSBIO &io,TGLCSBEngine &engine) {
+ if (engine.setupValid) return;
+ auto descriptor=*reinterpret_cast<uint8_t **>(io.streamer+0x28);
+ uint32_t v[3];
+ io.acquire();
+ for (unsigned i=0;i<3;++i) {
+  uint32_t reg;memcpy(&reg,descriptor+tglEngineSetupDesc[i],4);
+  if (!reg || (reg&3) || reg>tglHost.barSize-4) return;
+  v[i]=*reinterpret_cast<volatile uint32_t *>(io.bar+reg);
+ }
+ // Only a programmed engine: status page set and legacy ring mode disabled.
+ if (!v[0] || (v[0]&0xFFF) || !(v[1]&8)) return;
+ memcpy(engine.setup,v,sizeof(v));engine.setupValid=true;
+}
+
+// Forcewake-held RCS snapshots: [i][0..15] before recovery, [i][16..31] after replay.
+static constexpr uint32_t tglResetDiagRegs[15] {0x2080,0x229C,0x20B4,0x23A0,0x2034,0x2030,0x203C,
+ 0x2234,0x2238,0x2180,0x2074,0x206C,0x2068,0x20B8,0x2140};
+uint32_t tglResetDiag[16][32] {};
+uint32_t tglResetDiagCount {};
+static void tglResetDiagSnap(TGLCSBIO &io,unsigned slot,unsigned half) {
+ if (slot>=16) return;
+ io.acquire();
+ auto descriptor=*reinterpret_cast<uint8_t **>(io.streamer+0x28);
+ uint32_t hws;memcpy(&hws,descriptor+0x35,4);
+ const uint32_t base=hws-0x80; // engine MMIO base (RCS 0x2000, CCS 0x1A000)
+ auto q=tglResetDiag[slot]+half*16;
+ for (unsigned i=0;i<15;++i) q[i]=*reinterpret_cast<volatile uint32_t *>(io.bar+base+tglResetDiagRegs[i]-0x2000);
+ q[15]=(io.engine<<24)|(*reinterpret_cast<volatile uint32_t *>(io.hwsp+0xBC)&0xFFFFFF);
+}
+void tglResetDiagBefore(void *channel) {
+ if (!tglCSB12Enabled) return;
+ auto ring=*reinterpret_cast<uint8_t **>(static_cast<uint8_t *>(channel)+0x130);
+ auto accelerator=ring ? *reinterpret_cast<uint8_t **>(ring+0x10) : nullptr;
+ auto scheduler=accelerator ? *reinterpret_cast<uint8_t **>(accelerator+0x1250) : nullptr;
+ auto streamer=scheduler ? *reinterpret_cast<void **>(scheduler+0xCA0+8*ring[0x40]) : nullptr;
+ if (!streamer) return;
+ TGLCSBIO io(streamer,0);
+ tglResetDiagSnap(io,__atomic_fetch_add(&tglResetDiagCount,1,__ATOMIC_RELAXED),0);
+}
+bool tglResetDiagSerialize(void *,void *,OSSerialize *s) {
+ auto d=OSData::withBytes(tglResetDiag,sizeof(tglResetDiag));if(!d)return false;
+ const bool ok=d->serialize(s);d->release();return ok;
+}
+
+static bool tglEngineSetupRestore(TGLCSBIO &io,TGLCSBEngine &engine) {
+ if (!engine.setupValid) return false;
+ auto descriptor=*reinterpret_cast<uint8_t **>(io.streamer+0x28);
+ io.acquire();
+ bool changed=false;
+ for (unsigned i=0;i<3;++i) {
+  uint32_t reg;memcpy(&reg,descriptor+tglEngineSetupDesc[i],4);
+  auto r=reinterpret_cast<volatile uint32_t *>(io.bar+reg);
+  const uint32_t now=*r;
+  if (i==1) {
+   if ((now&0xFFFF)==(engine.setup[1]&0xFFFF)) continue;
+   *r=0xFFFF0000U|(engine.setup[1]&0xFFFF);
+  } else {
+   if (now==engine.setup[i]) continue;
+   *r=engine.setup[i];
+  }
+  (void)*r;changed=true;
+ }
+ if (changed) {++engine.restored;__atomic_add_fetch(&tglEngineSetupRestores,1,__ATOMIC_RELAXED);}
+ return changed;
+}
+uint32_t tglEngineSharedResets {};
+
+// Render-domain setup from IntelAccelerator::initModeRegisters (RCU_MODE with
+// the CCS enable, render/compute nonpriv whitelists). GDRST clears it too.
+static constexpr uint32_t tglRenderSetupRegs[10] {0x14800,0x24D0,0x24D4,0x24D8,0x24DC,0x24E0,0x24F0,0x24F4,0x1A4D0,0x24F8};
+static constexpr uint32_t tglRenderSetupMasked=1; // first entry is a masked register
+uint32_t tglRenderSetup[10] {}, tglRenderSetupRestores {};
+bool tglRenderSetupValid {false};
+static void tglRenderSetupCapture(TGLCSBIO &io) {
+ if (tglRenderSetupValid || io.engine) return;
+ io.acquire();
+ for (unsigned i=0;i<10;++i) tglRenderSetup[i]=*reinterpret_cast<volatile uint32_t *>(io.bar+tglRenderSetupRegs[i]);
+ if (!tglRenderSetup[1]) return; // whitelist not programmed yet
+ tglRenderSetupValid=true;
+}
+static void tglRenderSetupRestore(TGLCSBIO &io) {
+ if (!tglRenderSetupValid) return;
+ io.acquire();bool changed=false;
+ for (unsigned i=0;i<10;++i) {
+  auto r=reinterpret_cast<volatile uint32_t *>(io.bar+tglRenderSetupRegs[i]);
+  const uint32_t now=*r;
+  if (i<tglRenderSetupMasked) {
+   if ((now&0xFFFF)==(tglRenderSetup[i]&0xFFFF)) continue;
+   *r=0xFFFF0000U|(tglRenderSetup[i]&0xFFFF);
+  } else {
+   if (now==tglRenderSetup[i]) continue;
+   *r=tglRenderSetup[i];
+  }
+  (void)*r;changed=true;
+ }
+ if (changed) __atomic_add_fetch(&tglRenderSetupRestores,1,__ATOMIC_RELAXED);
+}
+
 void tglCSBInitialize(void *streamer,uint32_t flags=0) {
  TGLCSBIO io(streamer,flags);auto &engine=tglCSBEngines[io.engine];
+ tglEngineSetupCapture(io,engine);
+ tglRenderSetupCapture(io);
  if(!io.engine && __atomic_load_n(&rplsOutgoingState,__ATOMIC_ACQUIRE))
   __atomic_store_n(&rplsOutgoingBlocked,1U,__ATOMIC_RELEASE);
  // Called before the first submission, wake reset, or GPU-reset replay. Never
@@ -16601,6 +16714,7 @@ bool tglCSBModeSerialize(void *,void *,OSSerialize *serializer) {
  const bool ok=data->serialize(serializer);data->release();return ok;
 }
 
+uint32_t tglCSBStalePending {};
 bool tglCSBSerialize(void *,void *,OSSerialize *serializer) {
  // Diagnostic copy only; not an atomic snapshot across engines or counters.
  uint64_t values[arrsize(tglCSBEngines)][10] {};
@@ -16693,6 +16807,11 @@ bool XE::installTGLCSB12(KernelPatcher &patcher,size_t index,mach_vm_address_t a
  if (ok) {
   auto data=OSSerializer::forTarget(nullptr,tglCSBSerialize);
   if (data) {root->setProperty("TGLCSB12Live",data);data->release();}
+  if (auto stale=OSSerializer::forTarget(nullptr,[](void *,void *,OSSerialize *s){auto n=OSNumber::withNumber(__atomic_load_n(&tglCSBStalePending,__ATOMIC_RELAXED),32);if(!n)return false;const bool ok=n->serialize(s);n->release();return ok;})) {root->setProperty("WEXCSBStalePendingDropped",stale);stale->release();}
+  if (auto restores=OSSerializer::forTarget(nullptr,[](void *,void *,OSSerialize *s){auto n=OSNumber::withNumber(__atomic_load_n(&tglEngineSetupRestores,__ATOMIC_RELAXED),32);if(!n)return false;const bool ok=n->serialize(s);n->release();return ok;})) {root->setProperty("WEXEngineSetupRestored",restores);restores->release();}
+  if (auto shared=OSSerializer::forTarget(nullptr,[](void *,void *,OSSerialize *s){auto n=OSNumber::withNumber(__atomic_load_n(&tglEngineSharedResets,__ATOMIC_RELAXED),32);if(!n)return false;const bool ok=n->serialize(s);n->release();return ok;})) {root->setProperty("WEXEngineSharedResets",shared);shared->release();}
+  if (auto rr=OSSerializer::forTarget(nullptr,[](void *,void *,OSSerialize *s){auto n=OSNumber::withNumber(__atomic_load_n(&tglRenderSetupRestores,__ATOMIC_RELAXED),32);if(!n)return false;const bool ok=n->serialize(s);n->release();return ok;})) {root->setProperty("WEXRenderSetupRestored",rr);rr->release();}
+  if (auto diag=OSSerializer::forTarget(nullptr,tglResetDiagSerialize)) {root->setProperty("WEXResetDiag",diag);diag->release();}
   if(checkKernelArgument("-wex-preempt-prio0")) {
    // schedDispatch disallows preemption whenever the running context has
    // hardware priority 0, the level default Metal queues map to, so a long
@@ -16733,8 +16852,32 @@ bool XE::wrapTGLCSBInit(void *streamer,void *owner,void *loop,void *scheduler,un
 }
 void XE::wrapTGLCSBWake(void *streamer) { tglCSBInitialize(streamer); }
 void XE::wrapTGLCSBReset(void *streamer) {
+ {
+  // Runs after resetGraphicsEngine's GDRST, before the native replay submits.
+  TGLCSBIO io(streamer,0);
+  tglRenderSetupRestore(io);
+  tglEngineSetupRestore(io,tglCSBEngines[io.engine]);
+ }
+ // Render and compute share a reset domain: a CCS GDRST also clears RCS.
+ // Restore every other engine the reset touched and restart its CSB intake
+ // from the hardware reset pointers, then run that engine's native reset
+ // replay so the work the hardware dropped completes instead of hanging.
+ for (auto &other : tglCSBEngines) {
+  if (!other.streamer || other.streamer==streamer || !other.setupValid || !other.hardwareReady) continue;
+  bool touched;
+  {TGLCSBIO io(other.streamer,0);touched=tglEngineSetupRestore(io,other);}
+  if (touched) {
+   tglCSBInitialize(other.streamer);
+   FunctionCast(wrapTGLCSBReset,callbackXE->orgTGLCSBReset)(other.streamer);
+   __atomic_add_fetch(&tglEngineSharedResets,1,__ATOMIC_RELAXED);
+  }
+ }
  tglCSBInitialize(streamer);
  FunctionCast(wrapTGLCSBReset,callbackXE->orgTGLCSBReset)(streamer);
+ {
+  TGLCSBIO io(streamer,0);
+  tglResetDiagSnap(io,__atomic_load_n(&tglResetDiagCount,__ATOMIC_RELAXED)-1,1);
+ }
 }
 void XE::wrapTGLCSBProcess(void *streamer,uint32_t flags) {
  TGLCSBIO io(streamer,flags);auto &engine=tglCSBEngines[io.engine];
@@ -16789,6 +16932,25 @@ void XE::wrapTGLCSBProcess(void *streamer,uint32_t flags) {
    }
   }
   if(handler==3)rplsOutgoingBeforeHandler(streamer,io.owner,io.engine,event,sample.source);
+  if(handler==0) {
+   // After a GPU reset, processGPUReset clears the per-stamp queue record
+   // (+0x1400+idx*32, queue index 0xFFFF) while the stamp's pending bit in
+   // +0x3C0 can still be set. csbProcessIdleToActive then indexes its queue
+   // masks with 0xFFFF and writes out of bounds. Drop the stale pending bit
+   // so the handler takes its native no-pending-work path.
+   auto x=static_cast<uint8_t *>(streamer);
+   const auto next=1U-(*reinterpret_cast<uint32_t *>(x+0x50)&1U);
+   if(auto item=*reinterpret_cast<uint8_t **>(x+0x30+next*16)) {
+    auto context=*reinterpret_cast<uint8_t **>(item);
+    auto channel=context ? *reinterpret_cast<uint8_t **>(context+0xB8) : nullptr;
+    const uint32_t stamp=channel ? *reinterpret_cast<uint32_t *>(channel+0x20) : UINT32_MAX;
+    if(stamp<0x100 && *reinterpret_cast<uint16_t *>(x+0x1408+stamp*32)==0xFFFF) {
+     auto &pending=*reinterpret_cast<uint64_t *>(x+0x3C0+(stamp>>6)*8);
+     const uint64_t bit=1ULL<<(stamp&63);
+     if(pending&bit) {pending&=~bit;__atomic_add_fetch(&tglCSBStalePending,1,__ATOMIC_RELAXED);}
+    }
+   }
+  }
   tglCSBMethods[handler](streamer,&entry);
   if (record) {
    // Existing fixed history: native return and resulting banks, no MMIO/wait.
