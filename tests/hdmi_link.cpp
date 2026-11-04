@@ -27,6 +27,9 @@ int main() {
     Sink s {};
     makeCTA(b,true,true,0x78,0xB8);
     assert(parseCTA(b,s) && s.valid && s.scdc && s.deep30 && s.deep36 && s.maxTMDSKHz==600000);
+    {uint8_t c[128];memcpy(c,b,128);assert(c[3]==0xF0 && stripYCbCr(c) && c[3]==0xC0 && checksum(c));
+     for(unsigned i=0;i<127;++i)if(i!=3)assert(c[i]==b[i]);
+     assert(!stripYCbCr(c));Sink again {};assert(parseCTA(c,again) && again.deep30 && again.maxTMDSKHz==600000);}
     assert(s.linkMaxKHz()==600000);
 
     // 1080p120 and 4K30 (297 MHz) at 10 bpc need 371.25 MHz and scrambling.
@@ -71,6 +74,9 @@ int main() {
     static const char hex[]="02035bf0e278034b616076101f04135f3f03122309070783010000e2004fe305c0006b030c002000b83c200020016dd85dc40178805b023078c354056d1a0000020f307800048b065a0ae60605018b5a00e30f0700e5018b849079565e00a0a0a0295030203500b9882100001a6fc200a0a0a0555030203500b9882100001a26";
     for(unsigned i=0;i<128;++i){unsigned v;sscanf(hex+2*i,"%2x",&v);b[i]=static_cast<uint8_t>(v);}
     assert(parseCTA(b,s) && s.valid && s.scdc && s.deep30 && s.deep36 && s.maxTMDSKHz==600000);
+    {uint8_t c[128];memcpy(c,b,128);assert(c[3]==0xF0 && stripYCbCr(c) && c[3]==0xC0 && checksum(c));
+     for(unsigned i=0;i<127;++i)if(i!=3)assert(c[i]==b[i]);
+     assert(!stripYCbCr(c));Sink again {};assert(parseCTA(c,again) && again.deep30 && again.maxTMDSKHz==600000);}
     uint8_t base[128]={0,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0};assert(isBaseBlock(base) && !isBaseBlock(b));
 
     // The real Odyssey G8 base block: EDID 1.3, digital input, depth undefined.
@@ -78,8 +84,10 @@ int main() {
     for(unsigned i=0;i<128;++i){unsigned v;sscanf(baseHex+2*i,"%2x",&v);base[i]=static_cast<uint8_t>(v);}
     assert(checksum(base));
     uint8_t copy[128];memcpy(copy,base,128);
+    assert(base[0x18]==0x2A); // 1.3 "RGB colour display" = 1.4 "RGB + YCbCr 4:4:4"
     assert(upgradeBaseDepth(copy,s) && copy[0x13]==4 && copy[0x14]==0xB2 && checksum(copy));
-    for(unsigned i=0;i<127;++i)if(i!=0x13 && i!=0x14)assert(copy[i]==base[i]);
+    assert(copy[0x18]==0x22); // 1.4: RGB 4:4:4 only, so macOS keeps HDMI in RGB
+    for(unsigned i=0;i<127;++i)if(i!=0x13 && i!=0x14 && i!=0x18)assert(copy[i]==base[i]);
     assert(!upgradeBaseDepth(copy,s)); // already 1.4
     Sink shallow=s;shallow.deep30=false;memcpy(copy,base,128);
     assert(!upgradeBaseDepth(copy,shallow) && !memcmp(copy,base,128));

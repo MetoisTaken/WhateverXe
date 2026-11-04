@@ -77,9 +77,24 @@ static inline bool parseCTA(const uint8_t *b,Sink &sink) {
 // 8 bpc. Present the HDMI VSDB DC_30bit capability as an EDID 1.4 digital
 // HDMI-a input with 10 bits per primary. Only an undefined 1.3 digital input
 // is changed; returns true when the block was rewritten.
+// Feature byte 0x18 bits 4:3 are the display type in 1.3 (01 = RGB colour) but
+// the supported colour encodings in 1.4 (01 = RGB + YCbCr 4:4:4). Keep them at
+// RGB 4:4:4 only: a reinterpreted 01 makes macOS drive HDMI as YCbCr, whose
+// output CSC the donor programs wrongly, and the sink shows solid green.
 static inline bool upgradeBaseDepth(uint8_t *b,const Sink &sink) {
     if(!isBaseBlock(b) || !checksum(b) || b[0x12]!=1 || b[0x13]!=3 || b[0x14]!=0x80 || !sink.valid || !sink.deep30)return false;
-    b[0x13]=4;b[0x14]=0xB2;
+    b[0x13]=4;b[0x14]=0xB2;b[0x18]&=static_cast<uint8_t>(~0x18U);
+    uint8_t sum=0;for(unsigned i=0;i<127;++i)sum+=b[i];
+    b[127]=static_cast<uint8_t>(0x100-sum);
+    return true;
+}
+
+// CTA-861 extension byte 3 bits 5:4 advertise YCbCr 4:4:4 / 4:2:2. Once the
+// base block is EDID 1.4, macOS honours them and drives HDMI as YCbCr, which
+// this donor's output CSC cannot produce. Present the sink as RGB only.
+static inline bool stripYCbCr(uint8_t *b) {
+    if(!b || b[0]!=0x02 || b[1]<1 || !checksum(b) || !(b[3]&0x30))return false;
+    b[3]=static_cast<uint8_t>(b[3]&~0x30U);
     uint8_t sum=0;for(unsigned i=0;i<127;++i)sum+=b[i];
     b[127]=static_cast<uint8_t>(0x100-sum);
     return true;

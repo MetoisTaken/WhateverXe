@@ -4206,6 +4206,7 @@ void XE::selectProfile(const XELP::Profile &profile) {
     rplsPlainContextProfile=rplsMemoryAdmitted;
     display12SmallGTDetected=profile.admitted() && XELP::display12SmallGT(profile.gt);
     adlsDisplaySelected=profile.admitted() && XELP::displayAdapter(profile.family)==XELP::DisplayAdapter::ADLS;
+    rplsAllowYCbCr=checkKernelArgument("-wex-rpls-allow-ycbcr");
     adlnNativeRCSProfileRequested=false;
     adlnRequested=profile.admitted() && profile.family==XELP::Family::AlderLakeN &&
         profile.display==XELP::Display::XeLPD && profile.gt==XELP::GT::ADLNSmall;
@@ -20882,7 +20883,12 @@ void XE::adlsHDMINoteDDC(void *controller,uint32_t bus,void *request) {
        *reinterpret_cast<uint32_t *>(r+0x0C)!=0xA0 || *reinterpret_cast<uint32_t *>(r+0x38)!=128)return;
     auto block=*reinterpret_cast<uint8_t **>(r+0x4C);
     if(!block)return;
-    if(!HDMILink::isBaseBlock(block)) {HDMILink::parseCTA(block,adlsHDMISinks[bus]);return;}
+    if(!HDMILink::isBaseBlock(block)) {
+        HDMILink::parseCTA(block,adlsHDMISinks[bus]);
+        // Only for sinks whose base block was upgraded to 1.4 (deep colour path).
+        if(adlsHDMISinks[bus].deep30)HDMILink::stripYCbCr(block);
+        return;
+    }
     // A new base block starts a new sink. Read its first extension now so the
     // base block handed to the OS can already state the sink's colour depth.
     adlsHDMISinks[bus]={};
@@ -21619,7 +21625,18 @@ static void tglObserveTiming(void *fb, void *path, const void *timing, uint32_t 
 		IORegistryEntry::getRegistryRoot()->setProperty(key, r, sizeof(r));
 	}
 }
+// setColorMode selects YCbCr output (PIPE_MISC bit 11 plus the output CSC)
+// for any colour mode other than 1 (RGB). The donor programs that CSC with
+// wrong coefficients on this display engine, so the sink shows solid green.
+// Keep the Raptor Lake-S display path in RGB; -wex-rpls-allow-ycbcr opts out.
+static uint32_t rplsColorModeForced[2] {};
 void XE::wrapTGLColorMode(void *controller, void *fb, void *path, uint32_t mode, uint32_t depth, bool flag, const void *timing) {
+	if (mode != 1 && callbackXE->adlsDisplaySelected && !callbackXE->rplsAllowYCbCr) {
+		rplsColorModeForced[0] = mode;
+		rplsColorModeForced[1] = __atomic_add_fetch(&rplsColorModeForced[1], 1, __ATOMIC_RELAXED);
+		IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSColorModeForcedRGB", rplsColorModeForced, sizeof(rplsColorModeForced));
+		mode = 1;
+	}
 	const uint32_t args = (mode & 0xFFFF) | ((depth & 0x7FFF) << 16) | (uint32_t(flag) << 31);
 	tglObserveTiming(fb, path, timing, 0, args);
 	auto plane = path ? *reinterpret_cast<void **>(static_cast<uint8_t *>(path) + 0x32C8) : nullptr;
