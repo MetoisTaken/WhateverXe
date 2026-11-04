@@ -12989,8 +12989,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			}
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLHangBatchCaptureReady",hangOK);
 			// The donor hang dump IOSleeps per register while callers such as
-			// WindowServer reconfiguration hold their gates; it is diagnostic only
-			// (void, result unused by debugGraphicsEngine). Skip it.
+			// WindowServer reconfiguration hold their gates; it is diagnostic only.
+			// Skip it, but return a report string: GPU restart prints the result.
 			if(rplsMemoryAdmitted && !checkKernelArgument("-wex-rpls-hang-dump")) {
 				static const uint8_t entry[]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48};
 				const bool routed=adlsDonorRoute(patcher,index,address,size,"__ZN20IGHardwareRingBuffer16dumpHangAnalysisEv",
@@ -17020,9 +17020,14 @@ extern "C" void tglHangPreStopWake(void *owner,bool enable,unsigned domains,unsi
  tglHostClock(c.q+3);__atomic_store_n(&tglHangPreStopState,2U,__ATOMIC_RELEASE);
 }
 
-void XE::wrapRPLSHangDump(void *) {
+const char *XE::wrapRPLSHangDump(void *) {
+	// getHardwareDiagnosisReport tail-calls the donor and returns its result,
+	// which IOAccelFIFOChannel2::restart prints and passes to reportGPURestart.
+	// The donor returns its ring-owned report buffer; never return garbage.
+	static char report[]="GPU hang analysis skipped by WhateverXe (-wex-rpls-hang-dump enables it)";
 	static uint32_t skipped {};
 	IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHangDumpSkipped",__atomic_add_fetch(&skipped,1,__ATOMIC_RELAXED),32);
+	return report;
 }
 
 void XE::wrapTGLHangRingDump(void *ring,void *registers) {

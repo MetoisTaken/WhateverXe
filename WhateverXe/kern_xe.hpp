@@ -168,7 +168,7 @@ private:
     static void adlsHDMILinkBeforeEnable(void *port);
     static void adlsHDMILinkAfterEnable(void *port,uint32_t result);
     mach_vm_address_t orgRPLSHangDump {};
-    static void wrapRPLSHangDump(void *ring);
+    static const char *wrapRPLSHangDump(void *ring);
     static uint32_t tglSignalLevelsBody(void *port, uint32_t swing, uint32_t emphasis, void *overrideConfig);
     XELP::SmallGTResources display12SmallGT;
     XELP::Profile xeProfile;
