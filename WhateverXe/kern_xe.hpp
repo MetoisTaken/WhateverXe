@@ -905,6 +905,8 @@ private:
 	mach_vm_address_t orgTGLHangRingDump {};
 	static void wrapTGLHangRingDump(void *ring, void *registers);
 	mach_vm_address_t orgTGLRecovery {};
+	mach_vm_address_t orgTGLEventTimeout {}, tglStampLUT {}, tglStampLUTSCI {};
+	static void *wrapTGLEventTimeout(void *machine,int stampIndex);
 	static void wrapTGLRecovery(void *channel);
 	mach_vm_address_t orgMPSIntelTask {};
 	bool rplsAllowYCbCr {false};

@@ -159,6 +159,9 @@
   "-wex-hdmi-legacy-link": [],
   "-wex-noboot-seed": [],
   "-wex-mps-intel-off": [],
+  "-wex-mtl-driver-fix-off": [],
+  "-wex-no-stamp-orphan": [],
+  "-wex-mpsgraph-stitching-on": [],
   "-wex-rpls-allow-ycbcr": [],
   "-wex-preempt-prio0": []
 }

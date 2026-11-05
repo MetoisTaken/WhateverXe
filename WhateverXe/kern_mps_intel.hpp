@@ -39,6 +39,32 @@ static constexpr uint8_t Find[] {
 static constexpr uint32_t JumpOffset = 32;
 static constexpr uint8_t Original[2] {0x0F,0x85}, Patched[2] {0x90,0xE9};
 
+// MPSGraph (macOS 26) stitches elementwise ops into convolution kernels. The
+// TGL compiler miscompiles a KxK (K>1) ndArrayConvolution2D with any stitched
+// binary epilogue (bias, batch norm, scale): the convolution sums are wrong.
+// MPSGRAPH_COMPILER_STITCHING=0 turns stitching off; make the option reader
+// behave as if it were set, without its log line:
+//   test rax; je end; mov word [opts],0x0101; mov rdi,rax; call atoi; test eax;
+//   jne log; mov byte [opts+2],1; log: lea; mov esi,eax; xor eax,eax; call; end:
+// becomes: test rax; je +0 -> mov word; jmp -> mov byte; jmp end.
+// Each write is one byte and every intermediate state is valid code, since
+// other processes can execute the shared page while it is being patched.
+static constexpr const char *GraphPath =
+	"/System/Library/Frameworks/MetalPerformanceShadersGraph.framework/Versions/A/MetalPerformanceShadersGraph";
+static constexpr uint8_t GraphFind[] {
+	0x48,0x85,0xC0, 0x74,0x2C, 0x66,0xC7,0x05,0x79,0x59,0xA4,0x2D,0x01,0x01,
+	0x48,0x89,0xC7, 0xE8,0xA3,0x56,0x0F,0x00, 0x85,0xC0, 0x75,0x07,
+	0xC6,0x05,0x68,0x59,0xA4,0x2D,0x01,
+	0x48,0x8D,0x3D,0x6F,0x37,0x1D,0x00, 0x89,0xC6, 0x31,0xC0, 0xE8,0x94,0x59,0x0F,0x00
+};
+struct GraphByte { uint8_t offset, value; };
+// In write order: skip the log, then skip atoi, then retarget je last.
+static constexpr GraphByte GraphPatch[] {{34,0x0E},{33,0xEB},{15,0x0A},{14,0xEB},{4,0x00}};
+static inline void graphPatched(uint8_t (&out)[sizeof(GraphFind)]) {
+	memcpy(out,GraphFind,sizeof(GraphFind));
+	for (const auto &b : GraphPatch) out[b.offset]=b.value;
+}
+
 // dyld_all_image_infos::sharedCacheSlide (LP64).
 static constexpr uint32_t SharedCacheSlideOffset = 152;
 
@@ -67,11 +93,11 @@ static inline uint64_t parseHex(const char *&p,const char *end) {
 	return v;
 }
 
-// Find the unslid __TEXT range of MPSCore in the dyld cache map text.
-static inline bool textRange(const char *map,size_t size,uint64_t &start,uint64_t &end) {
-	const size_t n=strlen(CorePath);const char *stop=map+size;
+// Find the unslid __TEXT range of an image (MPSCore by default) in the dyld cache map text.
+static inline bool textRange(const char *map,size_t size,uint64_t &start,uint64_t &end,const char *path=CorePath) {
+	const size_t n=strlen(path);const char *stop=map+size;
 	for (const char *p=map;p+n<stop;++p) {
-		if ((p==map || p[-1]=='\n') && !memcmp(p,CorePath,n) && p[n]=='\n') {
+		if ((p==map || p[-1]=='\n') && !memcmp(p,path,n) && p[n]=='\n') {
 			const char *q=p+n+1;const char *line=q;
 			while (q<stop && *q!='\n') ++q;
 			const char *t=line;

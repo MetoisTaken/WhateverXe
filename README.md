@@ -84,6 +84,8 @@ These settings are unnecessary at 96MB and do not increase firmware-allocated me
 - GPU selection is automatic; a `device-id` override is normally unnecessary.
 - Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U select tiling automatically. Do not use `-yTileDisable`; `AAPL,GfxYTile` is unnecessary.
 
+- On Tiger Lake-class GPUs (including Raptor Lake-S), WEX fixes Metal compute correctness at runtime: it patches the resident Tiger Lake Metal driver pages (no SIMD8 kernel binaries, a flush after every dispatch) and turns off MPSGraph kernel stitching, whose fused convolutions the shader compiler miscompiles. After a GPU reset it also completes a stamp whose work the reset dropped, so IOAccel no longer restarts the GPU forever. `-wex-mtl-driver-fix-off`, `-wex-mpsgraph-stitching-on` and `-wex-no-stamp-orphan` restore the native behavior for diagnosis.
+
 ## Tested features and known issues
 
 The common regression checks cover Metal, OpenGL, OpenCL, hardware H.264 encode/decode and HEVC decode. The table summarizes OS coverage and configuration-specific display features.

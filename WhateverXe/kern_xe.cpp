@@ -348,8 +348,57 @@ struct MPSIntelState {
 	uint64_t textStart {},textEnd {},site {};
 	uint32_t opens {},patches {},verified {},failures {},busy {};
 	bool mapRead {},mapFailed {};
+	// MPSGraph stitching default (same task hook and helpers).
+	uint64_t graphStart {},graphEnd {},graphSite {};
+	uint32_t graphPatches {},graphVerified {},graphFailures {};
+	bool graphEnabled {},graphMapRead {};
 };
 MPSIntelState mpsIntel;
+
+bool mpsGraphSerialize(void *,void *,OSSerialize *serializer) {
+	auto &m=mpsIntel;
+	uint64_t v[6] {m.graphStart,m.graphEnd,m.graphSite,m.graphPatches,m.graphVerified,m.graphFailures};
+	auto data=OSData::withBytes(v,sizeof(v));if(!data)return false;
+	const bool ok=data->serialize(serializer);data->release();return ok;
+}
+
+// Turn MPSGraph stitching off on the shared text page. Called from
+// mpsIntelApply with its busy flag held; every byte is verified first.
+static void mpsGraphApply(void *task,uint64_t slide) {
+	auto &m=mpsIntel;
+	if (!m.graphEnabled || !m.graphMapRead) return;
+	constexpr size_t n=sizeof(MPSIntel::GraphFind);
+	uint8_t patchedSite[n];MPSIntel::graphPatched(patchedSite);
+	if (!m.graphSite) {
+		const uint64_t start=m.graphStart+slide,end=m.graphEnd+slide;
+		static uint8_t chunk[65536+n];
+		uint64_t found=0;uint32_t hits=0;
+		for (uint64_t a=start;a<end;a+=65536) {
+			const uint64_t len=(end-a)<sizeof(chunk) ? end-a : sizeof(chunk);
+			if (len<n || m.copyIn(a,chunk,len)) break;
+			for (uint64_t k=0;k+n<=len && k<65536;++k)
+				if (chunk[k]==0x48 && (!memcmp(chunk+k,MPSIntel::GraphFind,n) || !memcmp(chunk+k,patchedSite,n))) {found=a+k;++hits;}
+		}
+		if (hits!=1) {__atomic_add_fetch(&m.graphFailures,1,__ATOMIC_RELAXED);m.graphEnabled=false;return;}
+		m.graphSite=found;
+	}
+	uint8_t now[n] {};
+	if (m.copyIn(m.graphSite,now,n)) return; // also faults the page in
+	if (!memcmp(now,patchedSite,n)) {__atomic_add_fetch(&m.graphVerified,1,__ATOMIC_RELAXED);return;}
+	if (memcmp(now,MPSIntel::GraphFind,n)) {__atomic_add_fetch(&m.graphFailures,1,__ATOMIC_RELAXED);return;}
+	auto pmap=m.taskPmap(task);
+	uint32_t pages[arrsize(MPSIntel::GraphPatch)] {};
+	for (unsigned i=0;i<arrsize(MPSIntel::GraphPatch);++i) {
+		pages[i]=pmap ? m.findPhys(pmap,m.graphSite+MPSIntel::GraphPatch[i].offset) : 0;
+		if (!pages[i]) {__atomic_add_fetch(&m.graphFailures,1,__ATOMIC_RELAXED);return;}
+	}
+	for (unsigned i=0;i<arrsize(MPSIntel::GraphPatch);++i) {
+		const uint64_t va=m.graphSite+MPSIntel::GraphPatch[i].offset;
+		m.physWrite((static_cast<uint64_t>(pages[i])<<12)|(va&0xFFF),MPSIntel::GraphPatch[i].value);
+	}
+	if (!m.copyIn(m.graphSite,now,n) && !memcmp(now,patchedSite,n)) __atomic_add_fetch(&m.graphPatches,1,__ATOMIC_RELAXED);
+	else __atomic_add_fetch(&m.graphFailures,1,__ATOMIC_RELAXED);
+}
 
 bool mpsIntelSerialize(void *,void *,OSSerialize *serializer) {
 	auto &m=mpsIntel;
@@ -375,11 +424,17 @@ void mpsIntelApply(void *task) {
 			auto map=FileIO::readFileToBuffer(MPSIntel::MapPath,size);
 			if (map) {
 				m.mapRead=MPSIntel::textRange(reinterpret_cast<const char *>(map),size,m.textStart,m.textEnd);
+				m.graphMapRead=MPSIntel::textRange(reinterpret_cast<const char *>(map),size,m.graphStart,m.graphEnd,MPSIntel::GraphPath);
 				Buffer::deleter(map);
 			}
 			if (!m.mapRead) m.mapFailed=true;
 		}
 		if (!m.mapRead) break;
+		{
+			uint64_t slide=0;
+			if (m.copyIn(dyld.addr+MPSIntel::SharedCacheSlideOffset,&slide,sizeof(slide))) break;
+			mpsGraphApply(task,slide);
+		}
 		if (!m.site) {
 			uint64_t slide=0;
 			if (m.copyIn(dyld.addr+MPSIntel::SharedCacheSlideOffset,&slide,sizeof(slide))) break;
@@ -425,12 +480,141 @@ void mpsIntelApply(void *task) {
 }
 }
 
+// The TGL Metal driver (user space, /Library/GPUBundles) has two defects that
+// produce wrong compute results. Its file cannot be modified: WindowServer only
+// maps platform-signed libraries. Patch the resident page instead, as for MPSCore.
+//  - ChalExecuteKernel prefers the SIMD8 binary for small dispatches; the 2020
+//    compiler miscompiles some SIMD8 kernels. js -> jmp skips that choice.
+//  - BuildGen8CommandBuffer emits the post-walker PIPE_CONTROL (CS stall, DC
+//    flush) only for one packet type, so a dispatch can read results the
+//    previous one has not written. jne -> nop nop flushes after every walker.
+// Opt out with -wex-mtl-driver-fix-off.
+struct MTLDriverFixSite { uint32_t offset; uint8_t len; uint8_t context[9]; uint8_t patchAt; uint8_t patched[2]; uint8_t patchLen; };
+static const MTLDriverFixSite mtlDriverFixSites[] {
+	{0x2C8BF,5,{0x45,0x85,0xFF,0x78,0x1C},3,{0xEB},1},
+	{0x38BE9,9,{0x83,0xBB,0xF0,0x00,0x00,0x00,0x03,0x75,0x08},7,{0x90,0x90},2},
+};
+static constexpr const char *MTLDriverPath="/Library/GPUBundles/AppleIntelTGLGraphicsMTLDriver.bundle/Contents/MacOS/AppleIntelTGLGraphicsMTLDriver";
+struct MTLDriverFixState { uint32_t tasks {}, found {}, patched {}, verified {}, failures {}, busy {}; bool enabled {}; };
+MTLDriverFixState mtlDriverFix;
+bool mtlDriverFixSerialize(void *,void *,OSSerialize *serializer) {
+	auto &f=mtlDriverFix;uint32_t v[5] {f.tasks,f.found,f.patched,f.verified,f.failures};
+	auto data=OSData::withBytes(v,sizeof(v));if(!data)return false;
+	const bool ok=data->serialize(serializer);data->release();return ok;
+}
+void mtlDriverFixApply(void *task) {
+	auto &m=mpsIntel;auto &f=mtlDriverFix;
+	if (!f.enabled || !task || m.currentTask()!=task || __atomic_exchange_n(&f.busy,1U,__ATOMIC_ACQUIRE)) return;
+	__atomic_add_fetch(&f.tasks,1,__ATOMIC_RELAXED);
+	do {
+		struct {uint64_t addr,size;int32_t format;} __attribute__((packed)) dyld {};
+		uint32_t count=5;
+		if (m.taskInfo(task,17,&dyld,&count) || !dyld.addr) break;
+		struct {uint32_t version,count;uint64_t array;} head {};
+		if (m.copyIn(dyld.addr,&head,sizeof(head)) || !head.array || !head.count || head.count>8192) break;
+		const size_t n=strlen(MTLDriverPath);
+		uint64_t base=0;
+		for (uint32_t i=head.count;i-- > 0 && !base;) {
+			uint64_t e[3] {};
+			if (m.copyIn(head.array+24ULL*i,e,sizeof(e)) || !e[0] || !e[1]) continue;
+			char path[128] {};
+			if (m.copyIn(e[1],path,n+1>sizeof(path) ? sizeof(path) : n+1)) continue;
+			if (!memcmp(path,MTLDriverPath,n) && path[n]==0) base=e[0];
+		}
+		if (!base) break;
+		__atomic_add_fetch(&f.found,1,__ATOMIC_RELAXED);
+		// Verify every site (original or already patched) before writing any byte.
+		bool ok=true,already=true;
+		for (auto &site : mtlDriverFixSites) {
+			uint8_t now[9] {};
+			if (m.copyIn(base+site.offset,now,site.len)) {ok=false;break;}
+			uint8_t patched[9];memcpy(patched,site.context,site.len);memcpy(patched+site.patchAt,site.patched,site.patchLen);
+			if (!memcmp(now,patched,site.len)) continue;
+			already=false;
+			if (memcmp(now,site.context,site.len)) {ok=false;break;}
+		}
+		if (!ok) {__atomic_add_fetch(&f.failures,1,__ATOMIC_RELAXED);break;}
+		if (already) {__atomic_add_fetch(&f.verified,1,__ATOMIC_RELAXED);break;}
+		auto pmap=m.taskPmap(task);
+		for (auto &site : mtlDriverFixSites) {
+			for (uint8_t k=0;k<site.patchLen;++k) {
+				const uint64_t va=base+site.offset+site.patchAt+k;
+				const uint32_t page=pmap ? m.findPhys(pmap,va) : 0;
+				if (!page) {ok=false;break;}
+				m.physWrite((static_cast<uint64_t>(page)<<12)|(va&0xFFF),site.patched[k]);
+			}
+			if (!ok) break;
+		}
+		if (ok) __atomic_add_fetch(&f.patched,1,__ATOMIC_RELAXED);
+		else __atomic_add_fetch(&f.failures,1,__ATOMIC_RELAXED);
+	} while (false);
+	__atomic_store_n(&f.busy,0U,__ATOMIC_RELEASE);
+}
+
 // IGAccelTask::initWithOptions runs on the thread of the process that first
 // uses the accelerator (IntelAccelerator::createUserGPUTask).
 bool XE::wrapMPSIntelTask(void *task,void *accelerator) {
 	const bool ok=FunctionCast(wrapMPSIntelTask,callbackXE->orgMPSIntelTask)(task,accelerator);
-	if (ok && mpsIntel.currentTask) mpsIntelApply(mpsIntel.currentTask());
+	if (ok && mpsIntel.currentTask) {mpsIntelApply(mpsIntel.currentTask());mtlDriverFixApply(mpsIntel.currentTask());}
 	return ok;
+}
+
+// A GPU reset drops the hung batch, so the stamp its channel was waiting for
+// is never written. IGAccelEventMachine::eventTimeout then finds no active
+// context, IOAccel skips the restart, and the watchdog fires again for the
+// same stamp forever: every client waiting on it hangs until reboot. When no
+// scheduler state still references the stamp (no queued entry, not in an
+// execlist port, no wait record) and that repeats, store the submitted value
+// into the stamp's memory so the work reads as finished. No donor or IOAccel
+// method is called, so restart_channel is not re-entered.
+uint32_t tglStampOrphan[3] {}; // completed count, last index, last value
+static int tglStampOrphanIndex=-1; static uint32_t tglStampOrphanSeen {};
+static bool tglStampReferenced(uint8_t *streamer,uint8_t *scheduler,int stamp) {
+	for (unsigned i=0;i<4;++i) {
+		// Work item -> hardware context -> channel -> stamp index.
+		auto item=*reinterpret_cast<uint8_t **>(streamer+0x30+i*8);
+		auto context=item ? *reinterpret_cast<uint8_t **>(item) : nullptr;
+		auto channel=context ? *reinterpret_cast<uint8_t **>(context+0xB8) : nullptr;
+		if (channel && *reinterpret_cast<int32_t *>(channel+0x20)==stamp) return true;
+	}
+	if (*reinterpret_cast<uint64_t *>(streamer+0x3C0)&(1ULL<<stamp)) return true;
+	if (*reinterpret_cast<uint64_t *>(streamer+0x1400+stamp*32)) return true;
+	auto queue=*reinterpret_cast<uint8_t **>(scheduler+0xAA0+stamp*8);
+	return queue && *reinterpret_cast<uint64_t *>(queue+0x4000)!=*reinterpret_cast<uint64_t *>(queue+0x4048);
+}
+void *XE::wrapTGLEventTimeout(void *machine,int stampIndex) {
+	auto self=callbackXE;
+	void *channel=FunctionCast(wrapTGLEventTimeout,self->orgTGLEventTimeout)(machine,stampIndex);
+	if (channel || stampIndex<0 || stampIndex>=0x40) {tglStampOrphanIndex=-1;return channel;}
+	auto em=static_cast<uint8_t *>(machine);
+	auto accel=*reinterpret_cast<uint8_t **>(em+0x10);
+	auto scheduler=accel ? *reinterpret_cast<uint8_t **>(accel+0x1250) : nullptr;
+	if (!scheduler) return channel;
+	const bool sci=(*reinterpret_cast<uint64_t *>(accel+0x1190)&0x18000)!=0;
+	const uint8_t type=reinterpret_cast<const uint8_t *>(sci ? self->tglStampLUTSCI : self->tglStampLUT)[stampIndex];
+	auto streamer=type<8 ? *reinterpret_cast<uint8_t **>(scheduler+0xCA0+8*type) : nullptr;
+	if (!streamer) return channel;
+	void *active=nullptr,*pending=nullptr;uint64_t busy=0;
+	using Active=void (*)(void *,uint32_t,void **,uint64_t *,void **);
+	(*reinterpret_cast<Active *>(*reinterpret_cast<uint8_t **>(scheduler)+0x198))(scheduler,type,&active,&busy,&pending);
+	if (active || pending || tglStampReferenced(streamer,scheduler,stampIndex)) {tglStampOrphanIndex=-1;return channel;}
+	if (tglStampOrphanIndex!=stampIndex) {tglStampOrphanIndex=stampIndex;tglStampOrphanSeen=1;return channel;}
+	if (++tglStampOrphanSeen<2) return channel;
+	tglStampOrphanIndex=-1;
+	// IOAccelEventMachineFast2: +0x28 per-index stamp memory pointers,
+	// +0xF0+idx*24 record whose +0x14 is the submitted stamp.
+	auto stamps=*reinterpret_cast<volatile uint32_t ***>(em+0x28);
+	volatile uint32_t *slot=stamps ? stamps[stampIndex] : nullptr;
+	if (!slot) return channel;
+	const uint32_t submitted=*reinterpret_cast<uint32_t *>(em+0x104+stampIndex*24);
+	if (static_cast<int32_t>(submitted-*slot)<=0) return channel;
+	*slot=submitted;
+	__atomic_add_fetch(&tglStampOrphan[0],1,__ATOMIC_RELAXED);tglStampOrphan[1]=static_cast<uint32_t>(stampIndex);tglStampOrphan[2]=submitted;
+	return channel;
+}
+bool tglStampOrphanSerialize(void *,void *,OSSerialize *s) {
+	auto d=OSData::withBytes(tglStampOrphan,sizeof(tglStampOrphan));if(!d)return false;
+	const bool ok=d->serialize(s);d->release();return ok;
 }
 
 namespace { void tglResetDiagBefore(void *channel); }
@@ -13178,6 +13362,18 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					if (mpsOK) if (auto st=OSSerializer::forTarget(nullptr,mpsIntelSerialize)) {
 						IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSIntelFix",st);st->release();
 					}
+					// MPSGraph stitching off: the TGL compiler miscompiles stitched convolutions.
+					m.graphEnabled=mpsOK && !checkKernelArgument("-wex-mpsgraph-stitching-on");
+					IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSGraphStitchingOffReady",m.graphEnabled);
+					if (m.graphEnabled) if (auto st=OSSerializer::forTarget(nullptr,mpsGraphSerialize)) {
+						IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSGraphStitchingOff",st);st->release();
+					}
+					// The TGL Metal driver fix shares this task hook and helpers.
+					mtlDriverFix.enabled=mpsOK && !checkKernelArgument("-wex-mtl-driver-fix-off");
+					IORegistryEntry::getRegistryRoot()->setProperty("WEXMTLDriverFixReady",mtlDriverFix.enabled);
+					if (mtlDriverFix.enabled) if (auto st=OSSerializer::forTarget(nullptr,mtlDriverFixSerialize)) {
+						IORegistryEntry::getRegistryRoot()->setProperty("WEXMTLDriverFix",st);st->release();
+					}
 				}
 				if (recoveryOK) {
 					// The native poll loses GDRST bits above bit 7 and can wait
@@ -13204,6 +13400,27 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					tglRecoveryStamp={reinterpret_cast<TGLRecovery::SubmitStamp>(submit),reinterpret_cast<TGLRecovery::WaitStamp>(address+0x41FE4)};
 					KernelPatcher::RouteRequest hook[] {{recovery,wrapTGLRecovery,orgTGLRecovery}};
 					recoveryOK=patcher.routeMultiple(index,hook,arrsize(hook),address,size);
+				}
+				if (recoveryOK && !checkKernelArgument("-wex-no-stamp-orphan")) {
+					// Exact donor: eventTimeout@15F22 with the stamp->engine LUT leas at +0x3B/+0x45.
+					const char *timeout="__ZN19IGAccelEventMachine12eventTimeoutEi";
+					const uint8_t head[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x41,0x89,0xf5};
+					auto t=patcher.solveSymbol<mach_vm_address_t>(index,timeout,address,size);
+					patcher.clearError();
+					const uint8_t *tb=reinterpret_cast<const uint8_t *>(t);
+					bool orphanOK=false;
+					if (t==address+0x15F22 && !memcmp(tb,head,sizeof(head)) &&
+						tb[0x3B]==0x48 && tb[0x3C]==0x8D && tb[0x3D]==0x35 && tb[0x45]==0x48 && tb[0x46]==0x8D && tb[0x47]==0x1D) {
+						int32_t dSCI,dLUT;memcpy(&dSCI,tb+0x3E,4);memcpy(&dLUT,tb+0x48,4);
+						tglStampLUTSCI=t+0x42+dSCI;tglStampLUT=t+0x4C+dLUT;
+						KernelPatcher::RouteRequest r[] {{timeout,wrapTGLEventTimeout,orgTGLEventTimeout}};
+						orphanOK=patcher.routeMultiple(index,r,arrsize(r),address,size);
+						patcher.clearError();
+					}
+					IORegistryEntry::getRegistryRoot()->setProperty("WEXStampOrphanReady",orphanOK);
+					if (orphanOK) if (auto st=OSSerializer::forTarget(nullptr,tglStampOrphanSerialize)) {
+						IORegistryEntry::getRegistryRoot()->setProperty("WEXStampOrphan",st);st->release();
+					}
 				}
 				if (recoveryOK) if (auto live=OSSerializer::forTarget(nullptr,tglRecoverySerialize)) {
 					IORegistryEntry::getRegistryRoot()->setProperty("TGLRecoveryLive",live);live->release();
@@ -16694,6 +16911,60 @@ static void tglRenderSetupRestore(TGLCSBIO &io) {
  if (changed) __atomic_add_fetch(&tglRenderSetupRestores,1,__ATOMIC_RELAXED);
 }
 
+// Runtime scheduler diagnostics (read-only): the last CSB events and a raw
+// snapshot of each streamer's ports, wait-queue records and stamp queues.
+struct TGLCSBTraceEntry { uint64_t time, raw; uint32_t engine, handler, active, stamp; };
+TGLCSBTraceEntry tglCSBTrace[256] {};
+uint32_t tglCSBTraceNext {};
+static uint32_t tglItemStamp(void *item) {
+ if (!item) return UINT32_MAX;
+ auto context=*reinterpret_cast<uint8_t **>(item);
+ auto channel=context ? *reinterpret_cast<uint8_t **>(context+0xB8) : nullptr;
+ return channel ? *reinterpret_cast<uint32_t *>(channel+0x20) : UINT32_MAX;
+}
+bool tglSchedDumpSerialize(void *,void *,OSSerialize *s) {
+ // Layout (u64 words): per engine 64 words header, then trace.
+ static uint64_t out[6*96+256*4];
+ memset(out,0,sizeof(out));
+ for (unsigned e=0;e<6;++e) {
+  auto st=static_cast<uint8_t *>(tglCSBEngines[e].streamer);auto q=out+e*96;
+  if (!st) continue;
+  q[0]=reinterpret_cast<uintptr_t>(st);q[1]=*reinterpret_cast<uint32_t *>(st+0x50);
+  q[2]=st[0x1C3C]|(static_cast<uint64_t>(st[0x1C00])<<8);
+  for (unsigned i=0;i<4;++i) {
+   auto item=*reinterpret_cast<uint8_t **>(st+0x30+i*8);
+   q[3+i*3]=reinterpret_cast<uintptr_t>(item);
+   if (item) {q[4+i*3]=tglItemStamp(item);q[5+i*3]=*reinterpret_cast<uint64_t *>(item+0x18);}
+  }
+  q[15]=*reinterpret_cast<uint64_t *>(st+0x3C0);
+  // Wait-queue records with a context pointer (stamp, ptr, word2..3).
+  unsigned n=0;
+  for (unsigned i=0;i<64 && n<10;++i) {
+   auto r=reinterpret_cast<uint64_t *>(st+0x1400+i*32);
+   if (!r[0]) continue;
+   q[19+n*4]=i;q[20+n*4]=r[0];q[21+n*4]=r[1];q[22+n*4]=r[2];++n;
+  }
+  // Per-stamp software queues with outstanding entries.
+  auto sched=*reinterpret_cast<uint8_t **>(st+0x20);n=0;
+  if (sched) for (unsigned i=0;i<64 && n<12;++i) {
+   auto sq=*reinterpret_cast<uint8_t **>(sched+0xAA0+i*8);
+   if (!sq) continue;
+   const auto head=*reinterpret_cast<uint64_t *>(sq+0x4000),tail=*reinterpret_cast<uint64_t *>(sq+0x4048);
+   if (head==tail) continue;
+   auto ent=sq+(head&0x1FF)*32;
+   q[59+n*3]=i|(head<<16)|(tail<<32);q[60+n*3]=*reinterpret_cast<uint64_t *>(ent+8);
+   q[61+n*3]=*reinterpret_cast<uint64_t *>(ent+0x18);++n;
+  }
+ }
+ auto t=out+6*96;const auto next=__atomic_load_n(&tglCSBTraceNext,__ATOMIC_RELAXED);
+ for (unsigned i=0;i<256;++i) {
+  const auto &x=tglCSBTrace[(next+i)&255];
+  t[i*4]=x.time;t[i*4+1]=x.raw;t[i*4+2]=x.engine|(static_cast<uint64_t>(x.handler)<<8)|(static_cast<uint64_t>(x.active)<<16);t[i*4+3]=x.stamp;
+ }
+ auto d=OSData::withBytes(out,sizeof(out));if(!d)return false;
+ const bool ok=d->serialize(s);d->release();return ok;
+}
+
 void tglCSBInitialize(void *streamer,uint32_t flags=0) {
  TGLCSBIO io(streamer,flags);auto &engine=tglCSBEngines[io.engine];
  tglEngineSetupCapture(io,engine);
@@ -16813,6 +17084,7 @@ bool XE::installTGLCSB12(KernelPatcher &patcher,size_t index,mach_vm_address_t a
   if (auto shared=OSSerializer::forTarget(nullptr,[](void *,void *,OSSerialize *s){auto n=OSNumber::withNumber(__atomic_load_n(&tglEngineSharedResets,__ATOMIC_RELAXED),32);if(!n)return false;const bool ok=n->serialize(s);n->release();return ok;})) {root->setProperty("WEXEngineSharedResets",shared);shared->release();}
   if (auto rr=OSSerializer::forTarget(nullptr,[](void *,void *,OSSerialize *s){auto n=OSNumber::withNumber(__atomic_load_n(&tglRenderSetupRestores,__ATOMIC_RELAXED),32);if(!n)return false;const bool ok=n->serialize(s);n->release();return ok;})) {root->setProperty("WEXRenderSetupRestored",rr);rr->release();}
   if (auto diag=OSSerializer::forTarget(nullptr,tglResetDiagSerialize)) {root->setProperty("WEXResetDiag",diag);diag->release();}
+  if (auto dump=OSSerializer::forTarget(nullptr,tglSchedDumpSerialize)) {root->setProperty("WEXSchedDump",dump);dump->release();}
   if(checkKernelArgument("-wex-preempt-prio0")) {
    // schedDispatch disallows preemption whenever the running context has
    // hardware priority 0, the level default Metal queues map to, so a long
@@ -16951,6 +17223,12 @@ void XE::wrapTGLCSBProcess(void *streamer,uint32_t flags) {
      if(pending&bit) {pending&=~bit;__atomic_add_fetch(&tglCSBStalePending,1,__ATOMIC_RELAXED);}
     }
    }
+  }
+  {
+   const auto slot=__atomic_fetch_add(&tglCSBTraceNext,1,__ATOMIC_RELAXED)&255;auto &t=tglCSBTrace[slot];
+   const auto active=*reinterpret_cast<uint32_t *>(io.streamer+0x50);
+   t.time=__builtin_ia32_rdtsc();t.raw=sample.raw;t.engine=io.engine;t.handler=handler+1;t.active=active;
+   t.stamp=tglItemStamp(*reinterpret_cast<void **>(io.streamer+0x30+active*16));
   }
   tglCSBMethods[handler](streamer,&entry);
   if (record) {
