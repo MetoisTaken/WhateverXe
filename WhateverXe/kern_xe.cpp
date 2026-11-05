@@ -568,7 +568,7 @@ bool XE::wrapMPSIntelTask(void *task,void *accelerator) {
 // into the stamp's memory so the work reads as finished. No donor or IOAccel
 // method is called, so restart_channel is not re-entered.
 uint32_t tglStampOrphan[3] {}; // completed count, last index, last value
-static int tglStampOrphanIndex=-1; static uint32_t tglStampOrphanSeen {};
+static uint8_t tglStampOrphanSeen[0x40] {}; // consecutive orphan timeouts per stamp
 static bool tglStampReferenced(uint8_t *streamer,uint8_t *scheduler,int stamp) {
 	for (unsigned i=0;i<4;++i) {
 		// Work item -> hardware context -> channel -> stamp index.
@@ -585,7 +585,8 @@ static bool tglStampReferenced(uint8_t *streamer,uint8_t *scheduler,int stamp) {
 void *XE::wrapTGLEventTimeout(void *machine,int stampIndex) {
 	auto self=callbackXE;
 	void *channel=FunctionCast(wrapTGLEventTimeout,self->orgTGLEventTimeout)(machine,stampIndex);
-	if (channel || stampIndex<0 || stampIndex>=0x40) {tglStampOrphanIndex=-1;return channel;}
+	if (stampIndex<0 || stampIndex>=0x40) return channel;
+	if (channel) {tglStampOrphanSeen[stampIndex]=0;return channel;}
 	auto em=static_cast<uint8_t *>(machine);
 	auto accel=*reinterpret_cast<uint8_t **>(em+0x10);
 	auto scheduler=accel ? *reinterpret_cast<uint8_t **>(accel+0x1250) : nullptr;
@@ -597,10 +598,11 @@ void *XE::wrapTGLEventTimeout(void *machine,int stampIndex) {
 	void *active=nullptr,*pending=nullptr;uint64_t busy=0;
 	using Active=void (*)(void *,uint32_t,void **,uint64_t *,void **);
 	(*reinterpret_cast<Active *>(*reinterpret_cast<uint8_t **>(scheduler)+0x198))(scheduler,type,&active,&busy,&pending);
-	if (active || pending || tglStampReferenced(streamer,scheduler,stampIndex)) {tglStampOrphanIndex=-1;return channel;}
-	if (tglStampOrphanIndex!=stampIndex) {tglStampOrphanIndex=stampIndex;tglStampOrphanSeen=1;return channel;}
-	if (++tglStampOrphanSeen<2) return channel;
-	tglStampOrphanIndex=-1;
+	if (active || pending || tglStampReferenced(streamer,scheduler,stampIndex)) {tglStampOrphanSeen[stampIndex]=0;return channel;}
+	// Several stamps can be orphaned by one reset and time out in turn, so
+	// count per stamp: complete on the second consecutive orphan timeout.
+	if (++tglStampOrphanSeen[stampIndex]<2) return channel;
+	tglStampOrphanSeen[stampIndex]=0;
 	// IOAccelEventMachineFast2: +0x28 per-index stamp memory pointers,
 	// +0xF0+idx*24 record whose +0x14 is the submitted stamp.
 	auto stamps=*reinterpret_cast<volatile uint32_t ***>(em+0x28);
