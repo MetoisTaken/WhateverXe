@@ -13808,6 +13808,19 @@ bool XE::processFramebufferDonorRuntime(KernelPatcher &patcher,size_t index,mach
  return framebufferDonorRuntimeReady;
 }
 
+// Kept out of processKextFull, whose DEBUG stack frame has a fixed budget.
+bool XE::routeADLSHDMILink(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+    KernelPatcher::RouteRequest routes[]={
+        {"__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_",wrapADLSOnlineInfo,orgADLSOnlineInfo},
+        {"__ZN31AppleIntelFramebufferController11setupClocksEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",
+            wrapADLSSetupClocks,orgADLSSetupClocks},
+        {"__ZN31AppleIntelFramebufferController20calculatePllDivisorsEjP21AppleIntelDisplayPath",wrapADLSPllDivisors,orgADLSPllDivisors}
+    };
+    const bool ready=patcher.routeMultiple(index,routes,arrsize(routes),address,size);
+    patcher.clearError();
+    return ready;
+}
+
 bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
 	if (adlnRequested || adlnDetected) {
 		if (!adlnDetected || !adlnNativeRequested || !adlnNativeReady || !tglActive ||
@@ -14246,16 +14259,7 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
                         0x6C6D6,clocksEntry,sizeof(clocksEntry)) &&
                     adlsDonorSymbol(patcher,index,address,size,"__ZN31AppleIntelFramebufferController20calculatePllDivisorsEjP21AppleIntelDisplayPath",
                         0x6C9A0,pllEntry,sizeof(pllEntry));
-                if(known) {
-                    KernelPatcher::RouteRequest routes[]={
-                        {"__ZN21AppleIntelFramebuffer13getOnlineInfoEP21AppleIntelDisplayPathPhS2_",wrapADLSOnlineInfo,orgADLSOnlineInfo},
-                        {"__ZN31AppleIntelFramebufferController11setupClocksEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2",
-                            wrapADLSSetupClocks,orgADLSSetupClocks},
-                        {"__ZN31AppleIntelFramebufferController20calculatePllDivisorsEjP21AppleIntelDisplayPath",wrapADLSPllDivisors,orgADLSPllDivisors}
-                    };
-                    adlsHDMILinkReady=patcher.routeMultiple(index,routes,arrsize(routes),address,size);
-                    patcher.clearError();
-                }
+                if(known)adlsHDMILinkReady=routeADLSHDMILink(patcher,index,address,size);
                 IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSHDMILinkReady",adlsHDMILinkReady);
             }
 			{
