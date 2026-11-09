@@ -98,7 +98,7 @@ BIOS/UEFIで設定できる場合は、**DVMT Pre-Allocatedを96MB**にします
 | Raptor Lake-Uラップトップ | Big Sur・Tahoe：MiniBook X U300の内蔵MIPI DSI・輝度・回転・HiDPI・USB-C外部2画面。内蔵は50 Hz、Big Surでは任意設定の60 Hzも確認 |
 | Alder Lake-H | Big Sur〜Tahoe：96 EU、HDMIとDP→HDMI変換器による3画面。シングルチャネル構成の`4626`でもBig Surの加速を確認 |
 | Alder Lake-S | Big Sur〜Tahoe：UHD 770、HDMI/DP/USB-C、最大3画面、Safari動画。WidevineはBig Sur/Tahoeで確認 |
-| Raptor Lake-S | Tahoe：仮想マシンに割り当てたUHD 770、HDMI 1画面（最大3840x2160、60 Hz）、Metalによるグラフィックス加速 |
+| Raptor Lake-S | Tahoe：仮想マシンに割り当てたUHD 770、HDMIまたはDisplayPort 1画面（最大3840x2160、60 Hz。DisplayPortでは2560x1440、120 Hzにも対応）、Metalによるグラフィックス加速 |
 
 MIPI DSI対応は**試験的**で、検証したGPD MicroPC 2・CHUWI MiniBook X N100/U300の内蔵パネルに限ります。他の機器での動作を期待しないでください。
 

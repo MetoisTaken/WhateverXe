@@ -98,7 +98,7 @@ The common regression checks cover Metal, OpenGL, OpenCL, hardware H.264 encode/
 | Raptor Lake-U laptop | MiniBook X U300 on Big Sur/Tahoe: internal MIPI DSI, brightness, rotation, HiDPI and up to two USB-C displays. Internal panel: 50 Hz; optional 60 Hz also tested on Big Sur |
 | Alder Lake-H | Big Sur–Tahoe: 96 EU, three displays using HDMI and a DP-to-HDMI adapter. Single-channel `4626` graphics acceleration checked on Big Sur |
 | Alder Lake-S | Big Sur–Tahoe: UHD 770, HDMI/DP/USB-C and up to three displays; Safari video, with Widevine checked on Big Sur/Tahoe |
-| Raptor Lake-S | Tahoe: UHD 770 assigned to a virtual machine, one HDMI display up to 3840x2160 at 60 Hz and Metal graphics acceleration |
+| Raptor Lake-S | Tahoe: UHD 770 assigned to a virtual machine, one HDMI or DisplayPort display up to 3840x2160 at 60 Hz (also 2560x1440 at 120 Hz on DisplayPort) and Metal graphics acceleration |
 
 MIPI DSI support is **experimental**, limited to the tested GPD MicroPC 2 and CHUWI MiniBook X N100/U300 panels. Do not expect it to work on other devices.
 
