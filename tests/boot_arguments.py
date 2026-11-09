@@ -72,7 +72,7 @@ struct XE {
  bool adlnRequested=false, adlnDetected=false, adlnKernelReady=false, adlnNativeRequested=false, adlsDisplaySelected=false, display12SmallGTDetected=false;
  bool display13FramebufferRequested=false, display13TraceEnabled=false, adlpDisplaySelected=false, adlpRenderRequested=false;
  bool display12SmallGTReady=false, adlsDisplayHooksReady=false;
- bool adlsBootConsumersFailed=false, rplsAllowYCbCr=false;
+ bool adlsBootConsumersFailed=false, rplsAllowYCbCr=false, adlsHDMIDeepColor=false, adlsKeepPreCSCGamma=false;
  bool tglRequested=false, tglAcceleratorRequested=false;
  bool tglInactivePorts=false, tglPG1Poll=false, tglClockOrderRequested=false;
  bool tglProgramEnabled=false, tglTrainingLeaseRequested=false;

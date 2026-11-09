@@ -20,7 +20,7 @@ code=r'''
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
-struct State { bool adlsDisplaySelected=false; bool tglActive=true; uintptr_t tglComboPLLFractionCaller=0x1000; void *tglObservationController=nullptr; } state,*callbackXE=&state;
+struct State { bool adlsDisplaySelected=false; bool adlsKeepPreCSCGamma=false; bool tglActive=true; uintptr_t tglComboPLLFractionCaller=0x1000; void *tglObservationController=nullptr; } state,*callbackXE=&state;
 unsigned records=0;
 void tglTransitionRecord(unsigned stage,bool done,void *,unsigned long reg,uint32_t nominal,uint32_t actual,const uint64_t *detail,unsigned size) {
  assert(stage==70 && done && reg==0x164284 && nominal==0x1c001a5 && actual==0xe001a5);
