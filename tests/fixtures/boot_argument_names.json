@@ -162,6 +162,7 @@
   "-wex-mtl-driver-fix-off": [],
   "-wex-no-stamp-orphan": [],
   "-wex-mpsgraph-stitching-on": [],
+  "-wex-hdmi-deep-color": [],
   "-wex-rpls-allow-ycbcr": [],
   "-wex-preempt-prio0": []
 }

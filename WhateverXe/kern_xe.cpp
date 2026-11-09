@@ -4393,6 +4393,7 @@ void XE::selectProfile(const XELP::Profile &profile) {
     display12SmallGTDetected=profile.admitted() && XELP::display12SmallGT(profile.gt);
     adlsDisplaySelected=profile.admitted() && XELP::displayAdapter(profile.family)==XELP::DisplayAdapter::ADLS;
     rplsAllowYCbCr=checkKernelArgument("-wex-rpls-allow-ycbcr");
+    adlsHDMIDeepColor=checkKernelArgument("-wex-hdmi-deep-color");
     adlnNativeRCSProfileRequested=false;
     adlnRequested=profile.admitted() && profile.family==XELP::Family::AlderLakeN &&
         profile.display==XELP::Display::XeLPD && profile.gt==XELP::GT::ADLNSmall;
@@ -21180,6 +21181,9 @@ void XE::adlsHDMINoteDDC(void *controller,uint32_t bus,void *request) {
     *reinterpret_cast<uint8_t **>(query+0x4C)=extension;
     if(FunctionCast(wrapTGLGMBus,self->orgTGLGMBus)(controller,bus,0,query) || *reinterpret_cast<uint32_t *>(query+0x1C))return;
     HDMILink::parseCTA(extension,adlsHDMISinks[bus]);
+    // 10-bit HDMI is opt-in: a Samsung Odyssey G8 accepts the deep-colour
+    // link and General Control Packet but shows a black picture.
+    if(!self->adlsHDMIDeepColor) {adlsHDMISinks[bus].deep30=adlsHDMISinks[bus].deep36=false;return;}
     if(HDMILink::upgradeBaseDepth(block,adlsHDMISinks[bus])) {
         static uint32_t count {};
         uint32_t record[]={bus,adlsHDMISinks[bus].maxTMDSKHz,adlsHDMISinks[bus].scdc,__atomic_add_fetch(&count,1,__ATOMIC_RELAXED)};
@@ -21210,9 +21214,9 @@ void XE::wrapADLSSetupClocks(void *controller,void *framebuffer,void *path,const
     if(config && fb && timing) {
         auto bpp=reinterpret_cast<uint32_t *>(fb+0x44F8),encoder=reinterpret_cast<uint32_t *>(fb+0x44FC);
         const auto pixelHz=*reinterpret_cast<const uint64_t *>(static_cast<const uint8_t *>(timing)+0x28);
-        const auto plan=HDMILink::plan(adlsHDMISinks[self->adlsWiring.pin[config[0]]],pixelHz,*bpp);
+        const auto plan=HDMILink::plan(adlsHDMISinks[self->adlsWiring.pin[config[0]]],pixelHz,self->adlsHDMIDeepColor ? *bpp : 24);
         // SetupParams programs transcoder and pipe depth from these fields after us.
-        if(plan.clamped) {*bpp=24;*encoder=0;}
+        if(plan.clamped || (!self->adlsHDMIDeepColor && *bpp>24)) {*bpp=24;*encoder=0;}
         adlsHDMIPending={port,pixelHz,plan};
     }
     FunctionCast(wrapADLSSetupClocks,self->orgADLSSetupClocks)(controller,framebuffer,path,timing);
