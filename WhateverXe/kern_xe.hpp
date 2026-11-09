@@ -124,7 +124,7 @@ private:
     bool mobilePrimaryVCS2 {};
     bool adlsDisplaySelected {},adlsDisplayHooksReady {};
     bool adlsPortInitReady {},tglHPDHookReady {};
-    bool adlsPLLTableReady {},adlsClockReady {},adlsPowerReady {},adlsPanelPWMReady {};
+    bool adlsPLLTableReady {},adlsClockReady {},adlsPowerReady {},adlsPanelPWMReady {},adlsAGDCFilterReady {};
  XELP::PanelPWM adlsPanelPWM;
  mach_vm_address_t orgADLSLightUpEDP {},orgADLSPanelBacklight {};
  static bool adlsPanelPWMTarget(void *controller,void *&access,void *&power);
@@ -997,6 +997,11 @@ private:
 	static uint32_t wrapTGLFBOnline(void *controller, void *request);
 	mach_vm_address_t orgTGLAGDCRegister {};
 	static uint32_t wrapTGLAGDCRegister(void *controller, void *request);
+	void *adlsAGDCController {};
+	mach_vm_address_t adlsAGDCPolicy {};
+	void adlsInstallAGDCFilter(void *controller);
+	uint8_t *adlsAGDCDPFramebuffer(const void *request) const;
+	static uint64_t adlsAGDCFilter(void *context, void *argument, uint32_t flags, uint32_t event);
 	mach_vm_address_t orgTGLConnectionAttr {};
 	static uint32_t wrapTGLConnectionAttr(void *fb, int connection, uint32_t attribute, unsigned long *value);
 

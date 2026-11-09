@@ -1,3 +1,4 @@
+#include "kern_alderlake_s.hpp"
 #include "kern_xelp_combo_clock.hpp"
 #include <cassert>
 #include <cstdio>
@@ -71,5 +72,17 @@ int main() {
         assert(t.reg(0x46018,0x1000)==0x46018);
         assert(t.mux(0x1234,0x6D77E)==0x1234);
     }
-    puts("PASS ADL-S PHY D clock: separate select and ungate, shared PLL slots, translation");
+    // AGDC refusals: no answer, or an answer naming a configuration that does not exist.
+    {
+        using T=AlderLakeS::AGDCTiming;
+        assert(T::refused(0x100,0,1));
+        assert(T::refused(1,1,1));
+        assert(T::refused(1,0xFFFFFFFFU,1));
+        assert(!T::refused(1,0,1));
+        assert(T::nativeAvailable(1,5,0));
+        assert(!T::nativeAvailable(0,5,0));
+        assert(!T::nativeAvailable(1,2,0));
+        assert(!T::nativeAvailable(1,5,1));
+    }
+    puts("PASS ADL-S PHY D clock and fixed DP AGDC timing decisions");
 }

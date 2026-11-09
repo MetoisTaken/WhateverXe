@@ -217,6 +217,17 @@ inline bool comboRegisters(uint32_t ddi,uint32_t *registers,size_t count) {
         bank[i]=i?port.phyBase()+offsets[i]:0x64C00+4*port.phy;
     return true;
 }
+// The exact donor's two AGDC timing requests. Configuration 0 with no override
+// is its native path, which copies the requested timing unchanged.
+struct AGDCTiming {
+    static constexpr uint32_t Validate=0xA,Select=0xC;
+    static constexpr bool refused(uint64_t answer,uint32_t selected,uint32_t available) {
+        return !(answer&0xFF) || selected>=available;
+    }
+    static constexpr bool nativeAvailable(uint32_t available,uint32_t flags,uint32_t override) {
+        return available && !(flags&2) && !override;
+    }
+};
 // Five-word ClockParams ABI at the exact donor's combo-HDMI call boundary.
 // Keep logical divisors separate from register encodings. Display WA
 // 22010492432 halves only the DCO fraction for a 38.4 MHz reference.

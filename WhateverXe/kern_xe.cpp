@@ -15062,6 +15062,25 @@ void XE::processNativePanel(KernelPatcher &patcher,size_t index,mach_vm_address_
     // PANEL_TIMING_INSTALL_END
    }
 
+   if(adlsDisplaySelected) {
+    // Preflight the only two AGDC timing requests and how each result is consumed.
+    const uint8_t validateIndex[]={0x41,0x8B,0x86,0xDC,0x01,0,0,0x89,0x03};
+    const uint8_t validate[]={0xB9,0x0A,0,0,0,0xFF,0x90,0xF8,0x1B,0,0,0x84,0xC0};
+    const uint8_t selectIndex[]={0x41,0x8B,0x87,0xDC,0x01,0,0,0x41,0x89,0x04,0x24};
+    const uint8_t select[]={0xB9,0x0C,0,0,0,0xFF,0x90,0xF8,0x1B,0,0,0x84,0xC0};
+    const uint8_t selected[]={0x48,0x63,0x4D,0xDC,0x41,0x3B,0x8F,0x09,0x02,0,0};
+    const uint8_t native[]={0x43,0xF6,0x84,0x07,0x1D,0x02,0,0,0x02};
+    const uint8_t override[]={0x43,0x83,0xBC,0x07,0x8D,0x02,0,0,0};
+    adlsAGDCFilterReady=size>0x68358 &&
+     !memcmp(reinterpret_cast<void *>(address+0x3013F),validateIndex,sizeof(validateIndex)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x302B9),validate,sizeof(validate)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x68182),selectIndex,sizeof(selectIndex)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x68315),select,sizeof(select)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x68328),selected,sizeof(selected)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x68340),native,sizeof(native)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x6834F),override,sizeof(override));
+    IORegistryEntry::getRegistryRoot()->setProperty("ADLSAGDCFilterReady",adlsAGDCFilterReady);
+   }
    if(adlsDisplaySelected || (display13FramebufferRequested && adlnOutputWiring.panel)) {
     // ADLS_PANEL_PWM_INSTALL: preflight the native lifecycle and PWM enable site.
     const char *light="__ZN31AppleIntelFramebufferController10LightUpEDPEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2";
@@ -19717,7 +19736,56 @@ uint32_t XE::wrapTGLAGDCRegister(void *controller, void *request) {
 	tglTrace(5, id, false, a, b, 0, 0);
 	const auto r = FunctionCast(wrapTGLAGDCRegister, callbackXE->orgTGLAGDCRegister)(controller, request);
 	tglTrace(5, id, true, a, b, r, 0);
+	if (r == 0) callbackXE->adlsInstallAGDCFilter(controller);
 	return r;
+}
+
+void XE::adlsInstallAGDCFilter(void *controller) {
+	if (!adlsAGDCFilterReady || !controller) return;
+	auto &callback = *reinterpret_cast<uintptr_t *>(static_cast<uint8_t *>(controller) + 0x1BF8);
+	const auto filter = reinterpret_cast<uintptr_t>(adlsAGDCFilter);
+	if (!callback || callback == filter) return;
+	adlsAGDCController = controller;
+	adlsAGDCPolicy = callback;
+	__sync_synchronize();
+	callback = filter;
+}
+
+// Both AGDC timing requests start with the framebuffer index.
+uint8_t *XE::adlsAGDCDPFramebuffer(const void *request) const {
+	auto controller = static_cast<uint8_t *>(adlsAGDCController);
+	if (!controller || !request) return nullptr;
+	const auto index = *static_cast<const uint32_t *>(request);
+	if (index >= *reinterpret_cast<uint32_t *>(controller + 0xD5C)) return nullptr;
+	auto fb = *reinterpret_cast<uint8_t **>(controller + 0xD60 + 8 * static_cast<uint64_t>(index));
+	if (!fb) return nullptr;
+	const bool configured = *reinterpret_cast<int32_t *>(fb + 0x3FD8) != -1;
+	if (!*reinterpret_cast<uint32_t *>(fb + (configured ? 0x4A00 : 0x49E8))) return nullptr;
+	auto path = *reinterpret_cast<uint8_t **>(fb + (configured ? 0x4A08 : 0x49F0));
+	auto port = path ? *reinterpret_cast<uint8_t **>(path + 0x3648) : nullptr;
+	auto config = port ? *reinterpret_cast<const uint32_t **>(port + 0x548) : nullptr;
+	return adlsWiring.boundDP(tglPlatformCopy, config) ? fb : nullptr;
+}
+
+// AGDC rejects fixed DP timings needing more than one lane, then answers the
+// mode set with no usable configuration and the donor leaves its timing unwritten.
+// The donor still applies its own lane bandwidth check during validation.
+uint64_t XE::adlsAGDCFilter(void *context, void *argument, uint32_t flags, uint32_t event) {
+	using Timing = AlderLakeS::AGDCTiming;
+	auto self = callbackXE;
+	const auto policy = reinterpret_cast<uint64_t (*)(void *, void *, uint32_t, uint32_t)>(self->adlsAGDCPolicy);
+	auto fb = event == Timing::Validate || event == Timing::Select ? self->adlsAGDCDPFramebuffer(argument) : nullptr;
+	if (fb && event == Timing::Validate) return 0;
+	const auto answer = policy(context, argument, flags, event);
+	if (!fb) return answer;
+	auto &selected = *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(argument) + 0xAC);
+	const auto available = *reinterpret_cast<uint32_t *>(fb + 0x209);
+	if (Timing::refused(answer, selected, available) &&
+		Timing::nativeAvailable(available, *reinterpret_cast<uint32_t *>(fb + 0x21D), *reinterpret_cast<uint32_t *>(fb + 0x28D))) {
+		selected = 0;
+		return 1;
+	}
+	return answer;
 }
 
 uint32_t XE::wrapTGLConnectionAttr(void *fb, int connection, uint32_t attribute, unsigned long *value) {

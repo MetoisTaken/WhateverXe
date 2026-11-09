@@ -67,6 +67,7 @@ struct XE {
  static bool wrapTGLFramebufferStart(IOService*,IOService*);
  static bool wrapDisplay13FramebufferStart(IOService*,IOService*){assert(false);return false;}
  static uint32_t wrapTGLAGDCRegister(void*,void*);
+ void adlsInstallAGDCFilter(void*){}
  static void observeFramebufferUserClient(IOService*,uint32_t,void**,uint32_t){};
  static void tglTrace(unsigned,unsigned,bool,unsigned,unsigned,unsigned,unsigned long){};
 };
