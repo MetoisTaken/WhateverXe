@@ -164,5 +164,6 @@
   "-wex-mpsgraph-stitching-on": [],
   "-wex-hdmi-deep-color": [],
   "-wex-rpls-allow-ycbcr": [],
+  "-wex-rpls-degamma": [],
   "-wex-preempt-prio0": []
 }

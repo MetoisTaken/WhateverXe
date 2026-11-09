@@ -4394,6 +4394,7 @@ void XE::selectProfile(const XELP::Profile &profile) {
     adlsDisplaySelected=profile.admitted() && XELP::displayAdapter(profile.family)==XELP::DisplayAdapter::ADLS;
     rplsAllowYCbCr=checkKernelArgument("-wex-rpls-allow-ycbcr");
     adlsHDMIDeepColor=checkKernelArgument("-wex-hdmi-deep-color");
+    adlsKeepPreCSCGamma=checkKernelArgument("-wex-rpls-degamma");
     adlnNativeRCSProfileRequested=false;
     adlnRequested=profile.admitted() && profile.family==XELP::Family::AlderLakeN &&
         profile.display==XELP::Display::XeLPD && profile.gt==XELP::GT::ADLNSmall;
@@ -21713,6 +21714,11 @@ void XE::tglObserveScanout(void *fb, void *plane, uint32_t event, bool done, uin
 // Per-thread slots span the synchronous gamma call; publication is after it has
 // returned and released its native register lock. Upload and readback stay separate.
 void XE::wrapTGLRegisterWrite(void *access, unsigned long reg, uint32_t value) {
+	// Alder Lake-S / Raptor Lake-S pipes output all-zero pixels with pre-CSC gamma
+	// enabled (GAMMA_MODE bit 30 on pipes A-C); -wex-rpls-degamma opts out.
+	if (callbackXE->adlsDisplaySelected && !callbackXE->adlsKeepPreCSCGamma &&
+		(reg==0x4A480 || reg==0x4AC80 || reg==0x4B480))
+		value&=~0x40000000U;
 	if (callbackXE->tglActive && callbackXE->tglComboPLLFractionCaller &&
 		reinterpret_cast<uintptr_t>(__builtin_return_address(0)) == callbackXE->tglComboPLLFractionCaller) {
 		auto ctl = static_cast<uint8_t *>(callbackXE->tglObservationController);

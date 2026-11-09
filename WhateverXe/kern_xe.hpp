@@ -159,6 +159,7 @@ private:
     static uint32_t adlsHDMISwingOverride(void *port,uint32_t result);
     bool adlsHDMILinkReady {};
     bool adlsHDMIDeepColor {};
+    bool adlsKeepPreCSCGamma {};
     mach_vm_address_t orgADLSOnlineInfo {},orgADLSSetupClocks {},orgADLSPllDivisors {};
     static void wrapADLSOnlineInfo(void *framebuffer,void *path,uint8_t *a,uint8_t *b);
     static void wrapADLSSetupClocks(void *controller,void *framebuffer,void *path,const void *timing);
