@@ -26,6 +26,7 @@ Sequoia and Tahoe accept compatible updates within their OS family. Future Apple
 - Alder Lake-H: 96-EU configurations, including single-channel operation.
 - Alder Lake-S: UHD Graphics 770.
 - Raptor Lake-U: 48-EU configurations.
+- Raptor Lake-S: UHD Graphics 770.
 
 See [tested features and known issues](#tested-features-and-known-issues) for OS coverage and display configurations. PCI IDs are listed in [device selection](docs/device-selection.md).
 
@@ -84,8 +85,6 @@ These settings are unnecessary at 96MB and do not increase firmware-allocated me
 - GPU selection is automatic; a `device-id` override is normally unnecessary.
 - Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U select tiling automatically. Do not use `-yTileDisable`; `AAPL,GfxYTile` is unnecessary.
 
-- On Tiger Lake-class GPUs (including Raptor Lake-S), WEX fixes Metal compute correctness at runtime: it patches the resident Tiger Lake Metal driver pages (no SIMD8 kernel binaries, a flush after every dispatch) and turns off MPSGraph kernel stitching, whose fused convolutions the shader compiler miscompiles. After a GPU reset it also completes a stamp whose work the reset dropped, so IOAccel no longer restarts the GPU forever. `-wex-mtl-driver-fix-off`, `-wex-mpsgraph-stitching-on` and `-wex-no-stamp-orphan` restore the native behavior for diagnosis.
-
 ## Tested features and known issues
 
 The common regression checks cover Metal, OpenGL, OpenCL, hardware H.264 encode/decode and HEVC decode. The table summarizes OS coverage and configuration-specific display features.
@@ -99,6 +98,7 @@ The common regression checks cover Metal, OpenGL, OpenCL, hardware H.264 encode/
 | Raptor Lake-U laptop | MiniBook X U300 on Big Sur/Tahoe: internal MIPI DSI, brightness, rotation, HiDPI and up to two USB-C displays. Internal panel: 50 Hz; optional 60 Hz also tested on Big Sur |
 | Alder Lake-H | Big Sur–Tahoe: 96 EU, three displays using HDMI and a DP-to-HDMI adapter. Single-channel `4626` graphics acceleration checked on Big Sur |
 | Alder Lake-S | Big Sur–Tahoe: UHD 770, HDMI/DP/USB-C and up to three displays; Safari video, with Widevine checked on Big Sur/Tahoe |
+| Raptor Lake-S | Tahoe: UHD 770 assigned to a virtual machine, one HDMI display up to 3840x2160 at 60 Hz and Metal graphics acceleration |
 
 MIPI DSI support is **experimental**, limited to the tested GPD MicroPC 2 and CHUWI MiniBook X N100/U300 panels. Do not expect it to work on other devices.
 

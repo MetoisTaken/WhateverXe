@@ -26,6 +26,7 @@ SequoiaとTahoeは同じOS系列内の互換性のある更新に対応します
 - Alder Lake-H：シングルチャネルを含む96 EU構成。
 - Alder Lake-S：UHD Graphics 770。
 - Raptor Lake-U：48 EU構成。
+- Raptor Lake-S：UHD Graphics 770。
 
 OS別の範囲と表示構成は[動作確認済みの機能と既知の問題](#動作確認済みの機能と既知の問題)、PCI IDは[デバイス選択](docs/device-selection.md)を参照してください。
 
@@ -97,6 +98,7 @@ BIOS/UEFIで設定できる場合は、**DVMT Pre-Allocatedを96MB**にします
 | Raptor Lake-Uラップトップ | Big Sur・Tahoe：MiniBook X U300の内蔵MIPI DSI・輝度・回転・HiDPI・USB-C外部2画面。内蔵は50 Hz、Big Surでは任意設定の60 Hzも確認 |
 | Alder Lake-H | Big Sur〜Tahoe：96 EU、HDMIとDP→HDMI変換器による3画面。シングルチャネル構成の`4626`でもBig Surの加速を確認 |
 | Alder Lake-S | Big Sur〜Tahoe：UHD 770、HDMI/DP/USB-C、最大3画面、Safari動画。WidevineはBig Sur/Tahoeで確認 |
+| Raptor Lake-S | Tahoe：仮想マシンに割り当てたUHD 770、HDMI 1画面（最大3840x2160、60 Hz）、Metalによるグラフィックス加速 |
 
 MIPI DSI対応は**試験的**で、検証したGPD MicroPC 2・CHUWI MiniBook X N100/U300の内蔵パネルに限ります。他の機器での動作を期待しないでください。
 
