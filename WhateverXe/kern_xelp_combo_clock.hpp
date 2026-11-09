@@ -16,6 +16,20 @@ struct Port {
     uint32_t phy {},clockShift {},clockOff {};
     explicit Port(uint32_t p):phy(p),clockShift(2*(p%3)),clockOff(1U<<(p==0?10:p==1?11:p==2?24:p+1)){}
 };
+// ADL-S PHY D keeps its PLL select and clock gate together in DPCLKA_CFGCR1.
+// As with the other PHYs, selecting the PLL and ungating are separate writes.
+struct PhyDClock {
+    static constexpr uint32_t reg=0x1642BC;
+    template<class Read,class Write> static void enable(Read read,Write write,uint32_t pll) {
+        const Port route(3);
+        const auto selected=(read(reg)&~(3U<<route.clockShift))|(pll<<route.clockShift);
+        write(reg,selected|route.clockOff);
+        write(reg,selected&~route.clockOff);
+    }
+    template<class Read,class Write> static void disable(Read read,Write write) {
+        write(reg,read(reg)|Port(3).clockOff);
+    }
+};
 struct PLL {
     uint32_t enable {},cfg0 {},cfg1 {};
     static bool resolve(uint32_t id,PLL &out) {
@@ -30,6 +44,7 @@ struct ClockSnapshot {
     Layout layout=Layout::ADLS;
     unsigned pllCount() const {return layout==Layout::ADLS?4:2;}
     unsigned slots() const {return layout==Layout::ADLS?3:2;}
+    unsigned phys() const {return layout==Layout::ADLS?4:2;} // PHY D uses a slot-backed PLL.
     bool valid() const {
         for(auto v:mux)if(v==UINT32_MAX)return false;
         for(auto v:enable)if(v==UINT32_MAX)return false;
@@ -60,11 +75,11 @@ struct ClockAllocation {
     }
     // PLL+1, including an incomplete enable whose output is still gated.
     // The runtime serializes this state; startup clears only unowned bindings.
-    uint8_t binding[3] {};
+    uint8_t binding[4] {};
     // Explicit owner of a firmware link outside the donor clock transaction
     // (DSI may keep using its PLL with the DDI mux gated). Native enable/off
     // and sharing must not reprogram this owner or treat it as a DP clock.
-    uintptr_t external[3] {};
+    uintptr_t external[4] {};
     bool reset() {
         for(auto owner:external)if(owner)return false;
         for(auto &slot:binding)slot=0;
@@ -85,9 +100,9 @@ struct ClockAllocation {
         external[phy]=0;binding[phy]=0;return true;
     }
     template<class P> ClockChoice choose(const P &p,const ClockSnapshot &s,bool on) const {
-        if(p.phy>=s.slots() || external[p.phy] || !s.valid())return {};
+        if(p.phy>=s.phys() || external[p.phy] || !s.valid())return {};
         auto peers=s.peers(p);
-        for(unsigned phy=0;phy<3;++phy)
+        for(unsigned phy=0;phy<4;++phy)
             if(phy!=p.phy && binding[phy])peers|=1U<<(binding[phy]-1);
         const auto previous=s.active(p)?s.selected(p):binding[p.phy]?binding[p.phy]-1:UINT32_MAX;
         if(previous!=UINT32_MAX && previous>=s.pllCount())return {};
@@ -96,7 +111,7 @@ struct ClockAllocation {
         // Do not commandeer an enabled but unaccounted-for firmware PLL.
         auto busy=peers;
         for(unsigned pll=0;pll<s.pllCount();++pll)if(s.enable[pll]&0xCC000000U)busy|=1U<<pll;
-        if(!(busy&(1U<<p.phy)))return {p.phy,true,false};
+        if(p.phy<s.slots() && !(busy&(1U<<p.phy)))return {p.phy,true,false};
         for(unsigned pll=0;pll<s.slots();++pll)if(!(busy&(1U<<pll)))return {pll,true,false};
         return {};
     }
@@ -112,7 +127,8 @@ struct ClockTranslation {
     unsigned long reg(unsigned long r,uint32_t pc) const {
         if(!caller(pc))return r;
         PLL from,to;
-        if(!PLL::resolve(phy,from) || !PLL::resolve(pll,to))return r;
+        // The donor halves DDI 4, which PHY D runs as, to its slot 2 PLL registers.
+        if(!PLL::resolve(phy<3?phy:2,from) || !PLL::resolve(pll,to))return r;
         if(r==from.enable)return to.enable;
         if(r==from.cfg0)return to.cfg0;
         if(r==from.cfg1)return to.cfg1;

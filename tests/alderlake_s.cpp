@@ -110,7 +110,10 @@ int main() {
     assert(!w.selected() && w.excluded==24); // both ambiguous owners excluded
     fw={};fw.status=XELP::VBT::Status::Valid;fw.present=0x60;
     fw.port[5]={0x60D6,9,0,0x30,0xC0,0};fw.port[6]={0x60D2,4,5};
-    w=Wiring::fromFirmware(fw);assert(w.valid && !w.selected() && w.excluded==0x60);
+    w=Wiring::fromFirmware(fw);assert(w.valid && w.dp==0x20 && !w.hdmi && w.excluded==0x40);
+    // HDMI on PHY D is not qualified; only fixed DP uses that clock path.
+    fw={};fw.status=XELP::VBT::Status::Valid;fw.present=0x20;fw.port[5]={0x60D2,3,5};
+    w=Wiring::fromFirmware(fw);assert(w.valid && !w.selected() && w.excluded==0x20);
     // Physical TC1 still uses Combo B's clock selector, not DKL PLL1.
     Port hdmi;assert(Port::resolve(3,hdmi));
     assert(hdmi.clock==0x164280 && hdmi.clockShift==2 && hdmi.clockOff==0x800);

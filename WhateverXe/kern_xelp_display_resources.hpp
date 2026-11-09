@@ -30,9 +30,10 @@ struct ADLSComboResources {
     }
 };
 struct DisplayDonorCapacity {
-    // Exact C004FC1A enableClocks/disableClocks use three Combo entries.
+    // Exact C004FC1A enableClocks/disableClocks use three Combo entries. The fourth
+    // port, DDI 5 on PHY D, runs their DDI 4 path while the adapter owns its clock.
     // A fourth physical PLL register does not extend these native tables.
-    static constexpr uint32_t comboSlots(Donor donor) {return donor==Donor::C004FC1A?3:0;}
+    static constexpr uint32_t comboSlots(Donor donor) {return donor==Donor::C004FC1A?4:0;}
 };
 struct ADLSComboBackend {
     static constexpr uint32_t mask(Donor donor) {

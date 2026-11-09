@@ -43,7 +43,7 @@ int main() {
         assert(firmware.valid() && firmware.externalOnly && firmware.present==0x78 && !firmware.unmapped);
         assert(firmware.ambiguous==0x60 && !firmware.panel.valid);
         const auto wiring=AlderLakeS::Wiring::fromFirmware(firmware);
-        assert(wiring.valid && wiring.hdmi==0x18 && !wiring.dp && wiring.excluded==0x60);
+        assert(wiring.valid && wiring.hdmi==0x18 && wiring.dp==0x20 && wiring.excluded==0x40);
         assert(wiring.excludeDonorPanel && !wiring.panel);
         Platform output;const auto input=output;
         assert(wiring.apply(output.data(),sizeof(output)));
@@ -56,6 +56,9 @@ int main() {
             expected.config(d)[4]=0x800;expected.config(d)[5]=0x202;
             assert(wiring.bound(output.data(),output.config(d)));
         }
+        expected.config(5)[2]=1;expected.config(5)[3]=0;
+        expected.config(5)[4]=0x400;expected.config(5)[5]=0x201;
+        assert(wiring.bound(output.data(),output.config(5)));
         assert(!memcmp(output.data(),expected.data(),sizeof(output)));
         for(unsigned d=0;d<9;++d)assert(output.config(d)[0]==d);
         // Every guard runs before the first write, including both the donor

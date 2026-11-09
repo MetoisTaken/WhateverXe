@@ -47,6 +47,7 @@ struct XE {
  static uint8_t *adlsPowerTarget(void *p){return p==power?power:nullptr;}
  static bool comboClockPower(void *p,bool on){if(on)getPG(p,1);else putPG(p,1);return true;}
  static uint32_t comboClockRead(void *a,unsigned long r){return readNative(a,r);}
+ static void comboClockWrite(void *,unsigned long r,uint32_t v){mmio[r]=v;}
  static bool comboBeginClock(void*,void*,bool,bool&,void *other=nullptr);
  static void comboEndClock();
 } xe,*callbackXE=&xe;

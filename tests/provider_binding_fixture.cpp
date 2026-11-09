@@ -71,7 +71,7 @@ int main(int argc,char **argv) {
  assert(!xelpSelectedDevice(&foreignPCI));
  assert(!xelpDisplay13Device(&foreignPCI));
  config.combo=3;config.comboBackend=adln?3:7;config.legacy=adln?0:0x1F8;config.legacyBackend=adln?0:0x1F8;
- if(adls){config.combo=8;config.comboBackend=0x19;config.legacy=config.legacyBackend=0;}
+ if(adls){config.combo=8;config.comboBackend=0x39;config.legacy=config.legacyBackend=0;}
  if(adls && !rejected){assert(hardwareAllowed(&controller));assert(!tglProbePort(&port));}
  if(adlp){config.combo=0;config.comboBackend=3;config.legacy=8;config.legacyBackend=0x78;}
  // The contract derives generation from physical identity, not boot args.

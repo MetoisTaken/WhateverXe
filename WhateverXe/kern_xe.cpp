@@ -21013,7 +21013,7 @@ bool XE::comboBeginClock(void *controller,void *port,bool enable,bool &keepPLL,v
     const auto otherConfig=other && other!=port ? *reinterpret_cast<uint32_t **>(static_cast<uint8_t *>(other)+0x548):nullptr;
     const auto choice=enable && otherConfig ? t.allocation.share(XELPComboClock::Port(otherConfig[0]),snapshot):
         t.allocation.choose(route,snapshot,enable);
-    if(!choice.valid || route.phy>=snapshot.slots() || t.allocation.external[route.phy]) {
+    if(!choice.valid || route.phy>=snapshot.phys() || t.allocation.external[route.phy]) {
         comboClockPower(power,false);IORecursiveLockUnlock(t.lock);return false;
     }
     if(enable)t.allocation.binding[route.phy]=choice.pll+1;
@@ -21026,6 +21026,10 @@ bool XE::comboBeginClock(void *controller,void *port,bool enable,bool &keepPLL,v
 void XE::comboEndClock() {
     auto &t=comboClockTransaction;
     auto tr=t.translation;XELPComboClock::PLL pll;
+    // PHY D's gate is outside the donor's clock tables.
+    if(!tr.enabling && tr.phy==3)
+        XELPComboClock::PhyDClock::disable([&](uint32_t r){return comboClockRead(t.access,r);},
+            [&](uint32_t r,uint32_t v){comboClockWrite(t.access,r,v);});
     const auto state=XELPComboClock::PLL::resolve(tr.pll,pll)?comboClockRead(t.access,pll.enable):0;
     const auto mux=comboClockRead(t.access,0x164280);
     if(!tr.enabling && (t.keepPLL || !(state&0xCC000000U)))t.allocation.binding[tr.phy]=0;
@@ -21037,12 +21041,21 @@ void XE::comboEndClock() {
     IORegistryEntry::getRegistryRoot()->setProperty(key,record,sizeof(record));
 }
 
+// While non-null, DDI 5's platform record reads as DDI 4 for the donor's PLL path.
+// The Combo clock lock serializes the whole enable transaction.
+static uint32_t *adlsPhyDConfig;
+
 void XE::comboClockTranslateWrite(void *access,unsigned long &reg,uint32_t &value,uintptr_t caller) {
     if(!comboClockAccess(access))return;
     const auto pc=XELPComboClock::donorPC(callbackXE->framebufferClockImage,caller);
     const auto &tr=comboClockTransaction.translation;
     reg=tr.reg(reg,pc);
-    if(reg==0x164280 && tr.enabling && pc==0x6D77E) {
+    if(reg==0x164280 && tr.enabling && pc==0x6D77E && tr.phy>=3) {
+        // This write selects PHY C for the DDI 4 path; leave its mux unchanged.
+        // The donor next powers its port, which must be the real DDI 5.
+        value=comboClockRead(access,0x164280);
+        if(adlsPhyDConfig)*adlsPhyDConfig=5;
+    } else if(reg==0x164280 && tr.enabling && pc==0x6D77E) {
         value=tr.mux(value,pc);
         tr.prepareMux([&](uint32_t r){return comboClockRead(access,r);},
             [&](uint32_t r,uint32_t v){comboClockWrite(access,r,v);},value);
@@ -21074,7 +21087,18 @@ void XE::wrapADLSEnableClocks(void *controller,void *port,void *otherPort,uint32
         IORegistryEntry::getRegistryRoot()->setProperty("ADLSClockEnableRejected",true);return;
     }
     tglTransitionRecord(71,false,port,encoded.cfg0,encoded.cfg1,0);
+    // The donor selects the clock before programming the PLL and has no branch for
+    // DDI 5 (PHY D), so it would exit with the PLL never enabled. Run its DDI 4 path.
+    auto clockConfig=*reinterpret_cast<uint32_t **>(static_cast<uint8_t *>(port)+0x548);
+    const bool phyD=clockConfig[0]==5;
+    if(phyD){clockConfig[0]=4;adlsPhyDConfig=clockConfig;}
     FunctionCast(wrapADLSEnableClocks,callbackXE->orgComboEnableClocks)(controller,port,otherPort,params);
+    if(phyD) {
+        clockConfig[0]=5;adlsPhyDConfig=nullptr;
+        auto &t=comboClockTransaction;
+        XELPComboClock::PhyDClock::enable([&](uint32_t r){return comboClockRead(t.access,r);},
+            [&](uint32_t r,uint32_t v){comboClockWrite(t.access,r,v);},t.translation.pll);
+    }
     comboEndClock();
     tglTransitionRecord(71,true,port,encoded.cfg0,encoded.cfg1,0);
 }
@@ -21426,7 +21450,7 @@ int XE::wrapADLSSetupBootDisplay(void *controller) {
     r[4]=sde;r[5]=ctl;
     const auto &w=callbackXE->adlsWiring;
     uint32_t ddi=0xFF;
-    for(uint32_t d=3;d<7 && ddi==0xFF;++d)if(w.valid && (w.hdmi&(1U<<d)) && (sde&(1U<<(21+d))))ddi=d;
+    for(uint32_t d=3;d<7 && ddi==0xFF;++d)if(w.valid && ((w.hdmi|w.dp)&(1U<<d)) && (sde&(1U<<(21+d))))ddi=d;
     r[6]=ddi;
     // Before native hotplug enable the PCH pins read low. Then use an explicit
     // flag, else the lowest VBT-wired HDMI DDI; native online info still
@@ -21434,7 +21458,8 @@ int XE::wrapADLSSetupBootDisplay(void *controller) {
     uint32_t forced=0xFF;
     if(checkKernelArgument("-wex-boot-ddi3"))forced=3;
     else if(checkKernelArgument("-wex-boot-ddi4"))forced=4;
-    if(ddi==0xFF && forced!=0xFF && w.valid && (w.hdmi&(1U<<forced)))ddi=forced;
+    else if(checkKernelArgument("-wex-boot-ddi5"))forced=5;
+    if(ddi==0xFF && forced!=0xFF && w.valid && ((w.hdmi|w.dp)&(1U<<forced)))ddi=forced;
     if(ddi==0xFF && forced==0xFF && w.valid)for(uint32_t d=3;d<XELP::PortCount && ddi==0xFF;++d)if(w.hdmi&(1U<<d))ddi=d;
     r[7]=forced;r[8]=ddi;
     if(ddi==0xFF)return publish(5),result;                   // no connected wired HDMI sink

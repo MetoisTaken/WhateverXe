@@ -20,8 +20,11 @@ struct GT : XELP::SmallGTResources {
     }
 };
 static_assert(sizeof(GT)==6*sizeof(uint32_t),"Preserve GT resource layout");
-// The donor has three Combo clock slots. D/E need a separate clock allocator.
-constexpr uint32_t ComboBackendMask=XELP::ADLSComboBackend::mask(XELP::Donor::C004FC1A); // physical A/TC1/TC2, PHY A/B/C
+// The donor has three Combo clock slots; PHY D shares one through the clock adapter.
+// PHY E needs a separate clock allocator.
+constexpr uint32_t ComboBackendMask=XELP::ADLSComboBackend::mask(XELP::Donor::C004FC1A); // physical A/TC1/TC2/TC3, PHY A/B/C/D
+// HDMI clocking on PHY D is not qualified; only fixed DP uses that path.
+constexpr uint32_t ComboHDMIMask=ComboBackendMask&~(1U<<5);
 struct Port {
     uint32_t ddi {},phy {},buffer {},clock {},clockShift {},clockOff {},hpd {};
     static bool resolve(uint32_t ddi,Port &out) {
@@ -160,6 +163,7 @@ struct Wiring {
             const bool isDP=(p.type&0x14)==0x14 && !(p.type&(0x1000|0x400|0x20|1)) &&
                 !(p.flags&0x17) && !(p.capabilities&3);
             if(!isHDMI && !isDP)continue;
+            if(isHDMI && !(ComboHDMIMask&(1U<<d)))continue;
             // The native AUX engine is tied to physical DDI. Cross-routed
             // AUX requires its own backend; DDC is independently programmable.
             const auto bus=isHDMI?gmbus(p.ddc):(d>=3?d+6:d+1);

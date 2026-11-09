@@ -90,17 +90,18 @@ int main(){
   assert(object.firmwarePorts.externalOnly==!extraType);
   reinterpret_cast<uint32_t *>(original+0x68)[1]=9;
   reinterpret_cast<uint32_t *>(original+0x80)[1]=10;
+  reinterpret_cast<uint32_t *>(original+0x98)[1]=11;
   IOService provider;assert(XE::tglLoadHDMIWiring(&provider));
-  assert(object.adlsWiring.excludeDonorPanel==!extraType && object.adlsWiring.excluded==((extraType&2)?0x61U:0x60U));
+  assert(object.adlsWiring.excludeDonorPanel==!extraType && object.adlsWiring.excluded==((extraType&2)?0x41U:0x40U));
   assert(XE::wrapTGLGetOSInformation(controller) && platform()!=original);
   assert(object.adlsWiring.bound(platform(),reinterpret_cast<uint32_t *>(platform()+0x68)));
   assert(object.adlsWiring.bound(platform(),reinterpret_cast<uint32_t *>(platform()+0x80)));
   if(!extraType) {
    assert(reinterpret_cast<uint32_t *>(platform()+0x20)[4]==1 && !reinterpret_cast<uint32_t *>(platform()+0x20)[5]);
-   expectUnchangedExcept(platform(),{0x30,0x34,0x70,0x74,0x78,0x7C,0x88,0x8C,0x90,0x94});
+   expectUnchangedExcept(platform(),{0x30,0x34,0x70,0x74,0x78,0x7C,0x88,0x8C,0x90,0x94,0xA0,0xA4,0xA8,0xAC});
   } else {
    assert(!memcmp(platform()+0x20,original+0x20,24));
-   expectUnchangedExcept(platform(),{0x70,0x74,0x78,0x7C,0x88,0x8C,0x90,0x94});
+   expectUnchangedExcept(platform(),{0x70,0x74,0x78,0x7C,0x88,0x8C,0x90,0x94,0xA0,0xA4,0xA8,0xAC});
   }
  }
  // ADL-S uses the same real entry points, while preserving the physical

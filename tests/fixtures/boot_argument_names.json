@@ -152,6 +152,7 @@
   "-wex-rpls-ggtt-compat-off": [],
   "-wex-boot-ddi3": [],
   "-wex-boot-ddi4": [],
+  "-wex-boot-ddi5": [],
   "-wex-nostolen-ggtt": [],
   "-wex-hdmi-hdcp": [],
   "-wex-native-hdmi-swing": [],

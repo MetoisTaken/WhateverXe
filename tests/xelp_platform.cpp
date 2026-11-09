@@ -39,7 +39,7 @@ int main() {
  for(auto id:{0xA7808086U,0xA7828086U,0xA7888086U,0xA78B8086U}) {
   auto p=identify(id,12);
   assert(displayAdapter(p.family)==DisplayAdapter::ADLS && p.gt==GT::ADLSSmall && p.admitted());
-  ProbeConfig c;c.profile=p;c.combo=0x19;c.comboBackend=0x19;
+  ProbeConfig c;c.profile=p;c.combo=0x19;c.comboBackend=0x39;
   assert(c.valid()); // Registered desktop GT uses the common Display adapter.
   assert(!identify(id,12,0x46908086).admitted());
  }
@@ -103,15 +103,15 @@ int main() {
   }
  }
  assert(dpCases==16&&io.reads.empty());
- c={};c.profile=identify(0x46908086,12);c.combo=8;c.comboBackend=0x19;b.config=c;assert(c.valid());
+ c={};c.profile=identify(0x46908086,12);c.combo=8;c.comboBackend=0x39;b.config=c;assert(c.valid());
  for(unsigned d=0;d<9;++d){auto r=reinterpret_cast<uint32_t *>(platform+0x20+24*d);
   const uint32_t v[]={d,9,2,0,0x800,0x202};memcpy(r,v,sizeof(v));
   assert(probeMode(io,b,2,reinterpret_cast<uintptr_t>(r),r)==(d==3?1U:0U));}
- c.combo=24;c.comboBackend=0x19;b.config=c;assert(c.valid());
+ c.combo=24;c.comboBackend=0x39;b.config=c;assert(c.valid());
  auto dp=reinterpret_cast<uint32_t *>(platform+0x80);const uint32_t dpc[]={4,10,1,0,0x400,0x201};memcpy(dp,dpc,sizeof(dpc));
  assert(probeMode(io,b,2,reinterpret_cast<uintptr_t>(dp),dp)==1);
  for(unsigned i=0;i<6;++i){dp[i]^=1;assert(!probeMode(io,b,2,reinterpret_cast<uintptr_t>(dp),dp));dp[i]^=1;}
- c.combo=8;c.comboBackend=0x19;b.config=c;assert(!probeMode(io,b,2,reinterpret_cast<uintptr_t>(dp),dp));
+ c.combo=8;c.comboBackend=0x39;b.config=c;assert(!probeMode(io,b,2,reinterpret_cast<uintptr_t>(dp),dp));
  assert(io.reads.empty()); // ADL-S must never probe TGL FIA for its Combo TC1.
  for(unsigned bad=0;bad<5;++bad){auto x=c;if(bad==0)x.combo=2;if(bad==1)x.comboBackend=0x79;
   if(bad==2)x.legacy=8;if(bad==3)x.typeC=8;if(bad==4)x.profile.revision=256;assert(!x.valid());}
