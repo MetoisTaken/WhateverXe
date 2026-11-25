@@ -159,6 +159,8 @@ private:
     static uint32_t adlsHDMISwingOverride(void *port,uint32_t result);
     bool adlsHDMILinkReady {};
     bool routeADLSHDMILink(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
+    void installMPSIntelFix(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
+    void publishRPLSRuntime(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size,bool hostOK);
     bool adlsHDMIDeepColor {};
     bool adlsKeepPreCSCGamma {};
     mach_vm_address_t orgADLSOnlineInfo {},orgADLSSetupClocks {},orgADLSPllDivisors {};

@@ -12310,6 +12310,68 @@ static void xelpVideoIRQ(void *bridge,uint64_t *events) {
 }
 }
 
+// Kept out of processTGLAccelerator, whose DEBUG stack frame has a fixed budget.
+__attribute__((noinline)) void XE::installMPSIntelFix(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+	auto &m=mpsIntel;
+	m.taskInfo=reinterpret_cast<MPSIntelState::TaskInfo>(patcher.solveSymbol(KernelPatcher::KernelID,"_task_info"));
+	m.copyIn=reinterpret_cast<MPSIntelState::CopyIn>(patcher.solveSymbol(KernelPatcher::KernelID,"_copyin"));
+	m.currentTask=reinterpret_cast<MPSIntelState::CurrentTask>(patcher.solveSymbol(KernelPatcher::KernelID,"_current_task"));
+	m.taskPmap=reinterpret_cast<MPSIntelState::TaskPmap>(patcher.solveSymbol(KernelPatcher::KernelID,"_get_task_pmap"));
+	m.findPhys=reinterpret_cast<MPSIntelState::FindPhys>(patcher.solveSymbol(KernelPatcher::KernelID,"_pmap_find_phys"));
+	m.physWrite=reinterpret_cast<MPSIntelState::PhysWrite>(patcher.solveSymbol(KernelPatcher::KernelID,"_ml_phys_write_byte_64"));
+	patcher.clearError();
+	bool mpsOK=m.taskInfo && m.copyIn && m.currentTask && m.taskPmap && m.findPhys && m.physWrite &&
+		patcher.solveSymbol<mach_vm_address_t>(index,"__ZN11IGAccelTask15initWithOptionsEP16IntelAccelerator",address,size)==address+0x788C;
+	patcher.clearError();
+	if (mpsOK) {
+		KernelPatcher::RouteRequest shared {"__ZN11IGAccelTask15initWithOptionsEP16IntelAccelerator",wrapMPSIntelTask,orgMPSIntelTask};
+		mpsOK=patcher.routeMultiple(index,&shared,1,address,size);patcher.clearError();
+	}
+	IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSIntelFixReady",mpsOK);
+	if (mpsOK) if (auto st=OSSerializer::forTarget(nullptr,mpsIntelSerialize)) {
+		IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSIntelFix",st);st->release();
+	}
+	// MPSGraph stitching off: the TGL compiler miscompiles stitched convolutions.
+	m.graphEnabled=mpsOK && !checkKernelArgument("-wex-mpsgraph-stitching-on");
+	IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSGraphStitchingOffReady",m.graphEnabled);
+	if (m.graphEnabled) if (auto st=OSSerializer::forTarget(nullptr,mpsGraphSerialize)) {
+		IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSGraphStitchingOff",st);st->release();
+	}
+	// The TGL Metal driver fix shares this task hook and helpers.
+	mtlDriverFix.enabled=mpsOK && !checkKernelArgument("-wex-mtl-driver-fix-off");
+	IORegistryEntry::getRegistryRoot()->setProperty("WEXMTLDriverFixReady",mtlDriverFix.enabled);
+	if (mtlDriverFix.enabled) if (auto st=OSSerializer::forTarget(nullptr,mtlDriverFixSerialize)) {
+		IORegistryEntry::getRegistryRoot()->setProperty("WEXMTLDriverFix",st);st->release();
+	}
+}
+
+// Kept out of processTGLAccelerator, whose DEBUG stack frame has a fixed budget.
+__attribute__((noinline)) void XE::publishRPLSRuntime(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size,bool hostOK) {
+	rplsRuntimeReady=rplsRuntimeReady && hostOK;
+	auto root=IORegistryEntry::getRegistryRoot();
+	root->setProperty("WEXRPLSRuntimeRCSReady",rplsRuntimeReady);
+	rplsOutgoingReady=rplsRuntimeReady && rplsOutgoingInstall(patcher,index,address,size);
+	root->setProperty("WEXRPLSOutgoingReady",rplsOutgoingReady);
+	if(auto live=OSSerializer::forTarget(nullptr,rplsOutgoingInstallSerialize)) {
+		root->setProperty("WEXRPLSOutgoingInstall",live);live->release();
+	}
+	if(auto live=OSSerializer::forTarget(nullptr,rplsOutgoingSerialize)) {
+		root->setProperty("WEXRPLSOutgoingLifetime",live);live->release();
+	}
+	if(auto live=OSSerializer::forTarget(nullptr,rplsRuntimeSerialize)) {
+		root->setProperty("WEXRPLSRuntimeRCSState",live);live->release();
+	}
+	if(auto live=OSSerializer::forTarget(nullptr,tglExecutionSerialize,reinterpret_cast<void *>(1))) {
+		root->setProperty("WEXRPLSRuntimeRCSExecution",live);live->release();
+	}
+	if(auto live=OSSerializer::forTarget(nullptr,tglSubmitCaptureSerialize)) {
+		root->setProperty("WEXRPLSRuntimeRCSSubmit",live);live->release();
+	}
+	if(auto live=OSSerializer::forTarget(nullptr,tglFaultSerialize,reinterpret_cast<void *>(1))) {
+		root->setProperty("WEXRPLSRuntimeRCSFault",live);live->release();
+	}
+}
+
 bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
  if(adlnDetected && tglAcceleratorRequested)dsiBackingHooksReady=processDSIBackingHooks(patcher,index,address,size);
  // Framebuffer-only mode must never enter the donor accelerator probe.
@@ -12329,9 +12391,9 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
  if(display13FramebufferRequested && !adlnOutputWiring.dsi) {
     const char *symbol="__ZN18IGAccelDisplayPipe23initFramebufferResourceEjP16IOAccelResource2";
     const auto target=patcher.solveSymbol(index,symbol,address,size);
-    const uint8_t call[]={0xe8,0xb8,0xfb,0xff,0xff};
-    const uint8_t layout[]={0x45,0x89,0xaf,0x94,0x01,0,0,0x41,0x89,0x87,0x90,0x01,0,0};
-    const uint8_t aperture[]={0x31,0xf6,0xff,0x90,0xa8,0x09,0,0};
+    static const uint8_t call[]={0xe8,0xb8,0xfb,0xff,0xff};
+    static const uint8_t layout[]={0x45,0x89,0xaf,0x94,0x01,0,0,0x41,0x89,0x87,0x90,0x01,0,0};
+    static const uint8_t aperture[]={0x31,0xf6,0xff,0x90,0xa8,0x09,0,0};
     const bool known=size>0x7f435 && target==address+0x7f160 &&
         !memcmp(reinterpret_cast<void *>(address+0x7f2dd),call,sizeof(call)) &&
         !memcmp(reinterpret_cast<void *>(address+0x7ef87),layout,sizeof(layout)) &&
@@ -12406,8 +12468,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// r135: TGL B0 object-preemption topology corruption (Vol14 UP3 p53).
 			// One native immediate feeds both CS_DEBUG_MODE1 and CS_CHICKEN1.
 			// Keep its write mask and compute-preemption fields; clear only bit0.
-			const uint8_t objectPreemptFind[] {0xBA,0x01,0x00,0x01,0x00,0x89,0x90,0xEC,0x20,0x00,0x00};
-			const uint8_t objectPreemptReplace[] {0xBA,0x00,0x00,0x01,0x00,0x89,0x90,0xEC,0x20,0x00,0x00};
+			static const uint8_t objectPreemptFind[] {0xBA,0x01,0x00,0x01,0x00,0x89,0x90,0xEC,0x20,0x00,0x00};
+			static const uint8_t objectPreemptReplace[] {0xBA,0x00,0x00,0x01,0x00,0x89,0x90,0xEC,0x20,0x00,0x00};
 			auto objectPreemptSite=reinterpret_cast<uint8_t *>(address+0x2516C);
 			bool objectPreemptOK=skuReady && size>0x251A1 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator19startGraphicsEngineEv",address,size)==address+0x25100 &&
@@ -12421,8 +12483,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// r144: contexts can restore 2580 bit0 to1 (42/97 resident receipts).
 			// Select the global20EC bit0, which r135 clears and all97 receipts retain.
 			// Vol14 UP3 p53: object_preempt_en=20E0[14]?2580[0]:20EC[0].
-			const uint8_t objectSelectorFind[] {0xC7,0x80,0xE0,0x20,0,0,0,0x40,0,0x40};
-			const uint8_t objectSelectorReplace[] {0xC7,0x80,0xE0,0x20,0,0,0,0,0,0x40};
+			static const uint8_t objectSelectorFind[] {0xC7,0x80,0xE0,0x20,0,0,0,0x40,0,0x40};
+			static const uint8_t objectSelectorReplace[] {0xC7,0x80,0xE0,0x20,0,0,0,0,0,0x40};
 			auto selectorSite=reinterpret_cast<uint8_t *>(address+0x25189);
 			bool selectorOK=objectPreemptOK && !memcmp(selectorSite,objectSelectorFind,sizeof(objectSelectorFind));
 			patcher.clearError();
@@ -12435,8 +12497,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// Write20EC with mask bits1:0 (bit1 on, bit0 off), then restore EDX
 			// to r135's10000 before it also feeds2580. Do not alter compute mode.
 			// The replaced MMIO read was overwritten by the following MOV immediate.
-			const uint8_t ffDopFind[] {0x8B,0x90,0xEC,0x20,0,0,0xBA,0,0,1,0,0x89,0x90,0xEC,0x20,0,0};
-			const uint8_t ffDopReplace[] {0xBA,2,0,3,0,0x89,0x90,0xEC,0x20,0,0,0xBA,0,0,1,0,0x90};
+			static const uint8_t ffDopFind[] {0x8B,0x90,0xEC,0x20,0,0,0xBA,0,0,1,0,0x89,0x90,0xEC,0x20,0,0};
+			static const uint8_t ffDopReplace[] {0xBA,2,0,3,0,0x89,0x90,0xEC,0x20,0,0,0xBA,0,0,1,0,0x90};
 			auto ffDopSite=reinterpret_cast<uint8_t *>(address+0x25166);
 			bool ffDopOK=selectorOK && !memcmp(ffDopSite,ffDopFind,sizeof(ffDopFind));
 			patcher.clearError();
@@ -12449,8 +12511,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// Wa1608008084 programs TDS128 | GS224 with all other fields zero.
 			// Replace the conditional RMW as a whole, including its obsolete WA gate.
 			// Context restores receive the same value in the native-owned batch.
-			const uint8_t ffModeFind[] {0x0F,0xBA,0x63,0x18,0x1A,0x73,0x0A,0x81,0x88,0x04,0x66,0,0,0,0,4,0};
-			const uint8_t ffModeReplace[] {0xC7,0x80,0x04,0x66,0,0,0,0,4,0xE0,0x90,0x90,0x90,0x90,0x90,0x90,0x90};
+			static const uint8_t ffModeFind[] {0x0F,0xBA,0x63,0x18,0x1A,0x73,0x0A,0x81,0x88,0x04,0x66,0,0,0,0,4,0};
+			static const uint8_t ffModeReplace[] {0xC7,0x80,0x04,0x66,0,0,0,0,4,0xE0,0x90,0x90,0x90,0x90,0x90,0x90,0x90};
 			auto ffModeSite=reinterpret_cast<uint8_t *>(address+0x2561C);
 			bool ffModeOK=ffDopOK && size>0x25637 && !memcmp(ffModeSite,ffModeFind,sizeof(ffModeFind));
 			patcher.clearError();
@@ -12501,10 +12563,10 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
             // and for each media client's ring before native FIFO allocation.
             bool videoRoutingReady = !mobilePrimaryVCS2;
             if (mobilePrimaryVCS2 && urbReady && size > 0xBE8AC) {
-                const uint8_t testVCS0[] {0x41,0xF6,0x85,0,0x13,0,0,8};
-                const uint8_t testVCS2[] {0x41,0xF6,0x85,0,0x13,0,0,16};
-                const uint8_t context0[] {3,0,8,0,1,0,0,0,0,0,0,0};
-                const uint8_t context2[] {4,0,8,0,1,0,0,0,2,0,0,0};
+                static const uint8_t testVCS0[] {0x41,0xF6,0x85,0,0x13,0,0,8};
+                static const uint8_t testVCS2[] {0x41,0xF6,0x85,0,0x13,0,0,16};
+                static const uint8_t context0[] {3,0,8,0,1,0,0,0,0,0,0,0};
+                static const uint8_t context2[] {4,0,8,0,1,0,0,0,2,0,0,0};
                 auto startup = reinterpret_cast<uint8_t *>(address+0x25C8E);
                 auto systemContext = reinterpret_cast<uint8_t *>(address+0xB09B0);
                 auto mediaContext = reinterpret_cast<uint8_t *>(address+0xBE8A0);
@@ -12530,10 +12592,10 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// Native getBufferPtrNoInc then submits any pending init and rotates
 			// to a fresh buffer with event ownership intact. Do not alter CCS or
 			// fake completion. DP1 and20G have the same pool reservation contract.
-			const uint8_t ccsFind[] {0xBE,0x02,0x00,0x00,0x00};
-			const uint8_t ccsReplace[] {0xBE,0xFE,0x03,0x00,0x00};
-			const uint8_t ccsPoolBytes[] {0x48,0xC7,0x05,0xF3,0xD6,0x0C,0x00,0x00,0x10,0x00,0x00};
-			const uint8_t ccsTrailer[] {0xBB,0x08,0x00,0x00,0x00};
+			static const uint8_t ccsFind[] {0xBE,0x02,0x00,0x00,0x00};
+			static const uint8_t ccsReplace[] {0xBE,0xFE,0x03,0x00,0x00};
+			static const uint8_t ccsPoolBytes[] {0x48,0xC7,0x05,0xF3,0xD6,0x0C,0x00,0x00,0x10,0x00,0x00};
+			static const uint8_t ccsTrailer[] {0xBB,0x08,0x00,0x00,0x00};
 			auto ccsSite=reinterpret_cast<uint8_t *>(address+0x8CB80);
 			bool ccsReady=skuReady && size>0x8D4E0 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,
@@ -12553,7 +12615,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// but requests only the *remaining* pool space, so the pool never
 			// rotates before the emitter runs across its mapped 4 KiB page.
 			// Reserve the full usable page, as for the r124 color resolver.
-			const uint8_t hizFind[] {0x48,0x8B,0xB3,0x50,0x18,0,0,0x48,0x2B,0xB3,0x58,0x18,0,0,0x48,0xC1,0xEE,0x02,0x83,0xC6,0xFE};
+			static const uint8_t hizFind[] {0x48,0x8B,0xB3,0x50,0x18,0,0,0x48,0x2B,0xB3,0x58,0x18,0,0,0x48,0xC1,0xEE,0x02,0x83,0xC6,0xFE};
 			uint8_t hizReplace[sizeof(hizFind)];memset(hizReplace,0x90,sizeof(hizReplace));
 			hizReplace[0]=0xBE;hizReplace[1]=0xFE;hizReplace[2]=0x03;hizReplace[3]=0;hizReplace[4]=0;
 			auto hizSite=reinterpret_cast<uint8_t *>(address+0x85AFA);
@@ -12571,8 +12633,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			patcher.clearError();
 			// The original block emits type2 with Fast Clear Enable=0, a
 			// forbidden pairing. Only this exact emitter's type2 gains bit8.
-			const uint8_t ccsPSBlock[] {0xC1,0xE0,0x06,0x83,0xC8,0x02,0x66,0x41,0x89,0x87,0xA0,0,0,0,0x66,0x41,0xC7,0x87,0xA2,0,0,0,0x80,0x1F};
-			const uint8_t ccsPSType[] {0x8B,0x42,0x64,0x83,0xE0,0x03};
+			static const uint8_t ccsPSBlock[] {0xC1,0xE0,0x06,0x83,0xC8,0x02,0x66,0x41,0x89,0x87,0xA0,0,0,0,0x66,0x41,0xC7,0x87,0xA2,0,0,0,0x80,0x1F};
+			static const uint8_t ccsPSType[] {0x8B,0x42,0x64,0x83,0xE0,0x03};
 			auto ccsPSSite=reinterpret_cast<uint8_t *>(address+0x8D056);
 			bool ccsPSReady=ccsReady &&
 				!memcmp(ccsPSSite,ccsPSBlock,sizeof(ccsPSBlock)) &&
@@ -12610,9 +12672,9 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// AlderLakeN's flags mask in the linear and rotated GGTT writers.
 			bool systemFlagsOK=!adlnDetected;
 			if(adlnDetected) {
-				const uint32_t offsets[] {0x1033D,0x104D2};
-				const uint8_t find[] {0x48,0xB8,0xFE,0x0F,0x00,0x00,0x80,0xFF,0xFF,0xFF};
-				const uint8_t replace[] {0x48,0xB8,0,0,0,0,0,0,0,0};
+				static const uint32_t offsets[] {0x1033D,0x104D2};
+				static const uint8_t find[] {0x48,0xB8,0xFE,0x0F,0x00,0x00,0x80,0xFF,0xFF,0xFF};
+				static const uint8_t replace[] {0x48,0xB8,0,0,0,0,0,0,0,0};
 				systemFlagsOK=ggttOK;
 				for(auto offset:offsets)systemFlagsOK=systemFlagsOK &&
 					!memcmp(reinterpret_cast<void *>(address+offset),find,sizeof(find));
@@ -12633,7 +12695,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// allocations start at96MiB. The later dummy-PTE initialization stays.
 			bool reservedOK=!adlnDetected;
 			if (adlnDetected) {
-				const uint8_t find[] {0x77,0x4C},replace[] {0xEB,0x4C};
+				static const uint8_t find[] {0x77,0x4C},replace[] {0xEB,0x4C};
 				auto site=reinterpret_cast<uint8_t *>(address+0x1024E);
 				reservedOK=ggttOK && size>0x10311 &&
 					patcher.solveSymbol<mach_vm_address_t>(index,
@@ -12664,7 +12726,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGAcceleratorObservationsRouted", observed);
 			bool adlnObserved=true;
 			if (adlnDetected) {
-				const uint8_t callbackEntry[] {0x55,0x48,0x89,0xE5,0x48,0x8B,0xBF,0x48,0x12,0,0};
+				static const uint8_t callbackEntry[] {0x55,0x48,0x89,0xE5,0x48,0x8B,0xBF,0x48,0x12,0,0};
 				const auto callback=patcher.solveSymbol<mach_vm_address_t>(index,
 				 "__ZN16IntelAccelerator36_ProcessNonDisplayInterruptsCallbackEP8OSObject",address,size);
 				adlnObserved=size>0x2A9B6 && callback==address+0x2A9A2 &&
@@ -12675,7 +12737,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					{"__ZN16IntelAccelerator10getGPUInfoEv",wrapAlderLakeNNativeGPUInfo,orgAlderLakeNNativeGPUInfo},
 					{"__ZN16IntelAccelerator19initInterruptBridgeEv",wrapAlderLakeNNativeIRQ,orgAlderLakeNNativeIRQ}
 				};
-				const uintptr_t offsets[] {0x28422,0x2847E,0x24BC0};
+				static const uintptr_t offsets[] {0x28422,0x2847E,0x24BC0};
 				for (unsigned i=0;i<arrsize(native);++i)
 					adlnObserved=adlnObserved && patcher.solveSymbol<mach_vm_address_t>(index,native[i].symbol,address,size)==address+offsets[i];
 				patcher.clearError();
@@ -12691,11 +12753,11 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGAcceleratorStartRouted", ok);
 			// Check native helper bytes BEFORE existing GuC diagnostic routes.
 			// PRM Vol2c part1 pp121-124: valid + force even for empty ring restore.
-			const uint8_t cpsAllocHead[] {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50,0x41,0x89,0xce,0x41,0x89,0xd7,0x49,0x89,0xf4};
-			const uint8_t cpsCPUHead[] {0x55,0x48,0x89,0xe5,0x48,0x8b,0x47,0x38,0x5d,0xc3};
-			const uint8_t cpsGPUHead[] {0x55,0x48,0x89,0xe5,0x48,0x8b,0x7f,0x30,0x48,0x8b,0x7,0x5d,0xff,0xa0,0x28,0x1,0x0,0x0};
-			const uint8_t cpsPointer[] {0x49,0x8b,0x45,0x50,0x48,0x8b,0xb8,0xf8,0x13,0x0,0x0,0x48,0x85,0xff,0x74,0x13,0xe8,0x5f,0x7c,0xf9,0xff,0x83,0xc8,0x1,0x41,0x89,0x87,0x4c,0x10,0x0,0x0,0x49,0x8b,0x45,0x50};
-			const uint8_t cpsRelease[] {0x49,0x8b,0xbf,0xf8,0x13,0x0,0x0,0x48,0x85,0xff,0x74,0x6,0x48,0x8b,0x7,0xff,0x50,0x28,0x49,0xc7,0x87,0xf8,0x13,0x0,0x0,0x0,0x0,0x0,0x0};
+			static const uint8_t cpsAllocHead[] {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50,0x41,0x89,0xce,0x41,0x89,0xd7,0x49,0x89,0xf4};
+			static const uint8_t cpsCPUHead[] {0x55,0x48,0x89,0xe5,0x48,0x8b,0x47,0x38,0x5d,0xc3};
+			static const uint8_t cpsGPUHead[] {0x55,0x48,0x89,0xe5,0x48,0x8b,0x7f,0x30,0x48,0x8b,0x7,0x5d,0xff,0xa0,0x28,0x1,0x0,0x0};
+			static const uint8_t cpsPointer[] {0x49,0x8b,0x45,0x50,0x48,0x8b,0xb8,0xf8,0x13,0x0,0x0,0x48,0x85,0xff,0x74,0x13,0xe8,0x5f,0x7c,0xf9,0xff,0x83,0xc8,0x1,0x41,0x89,0x87,0x4c,0x10,0x0,0x0,0x49,0x8b,0x45,0x50};
+			static const uint8_t cpsRelease[] {0x49,0x8b,0xbf,0xf8,0x13,0x0,0x0,0x48,0x85,0xff,0x74,0x6,0x48,0x8b,0x7,0xff,0x50,0x28,0x49,0xc7,0x87,0xf8,0x13,0x0,0x0,0x0,0x0,0x0,0x0};
 			bool cpsOK=size>0x7C263 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,"__ZN20IGSharedMappedBuffer11withOptionsEP11IGAccelTaskmjj",address,size)==address+0x10924 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,"__ZNK20IGSharedMappedBuffer17getVirtualAddressEv",address,size)==address+0x10B60 &&
@@ -12762,13 +12824,13 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					patcher.solveSymbol<mach_vm_address_t>(index,"__ZN17IGInterruptBridge17processInterruptsEv",address,size)==address+0x4B414 &&
 					patcher.solveSymbol<mach_vm_address_t>(index,"__ZN17IGInterruptBridge17serviceInterruptsERK8IGBitSetILm46EE",address,size)==address+0x4B3A0 &&
 					patcher.solveSymbol<mach_vm_address_t>(index,"__ZN26IGHardwareCommandStreamer536handleSoftwareContextSwitchInterruptEP22IOInterruptEventSourcei",address,size)==address+0x39C9C;
-                const uint8_t wakeHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x38};
+                static const uint8_t wakeHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x38};
                 const bool executionWakeKnown=(adlnDetected || rplsMemoryAdmitted) && size>0x2DA26 &&
                  patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator26SafeForceWakeMultithreadedEbjj",address,size)==address+0x2D5AA &&
                  !memcmp(reinterpret_cast<void *>(address+0x2D5AA),wakeHead,sizeof(wakeHead));
                 hostOK=hostOK && (!adlnDetected || executionWakeKnown);
                 patcher.clearError();
-				const uint8_t loadBlock[] {0x48,0x8B,0x7B,0x10,0x48,0x8B,0x4B,0x28,0x48,0x8B,0x87,0x40,0x12,0x00,0x00,0x31,0xD2,0x8D,0x34,0xD5,0x00,0x00,0x00,0x00,0x03,0x71,0x19,0x8B,0x5C,0xD5,0xC0,0x89,0x1C,0x30,0x8B,0x5C,0xD5,0xC4,0x89,0x5C,0x30,0x04,0x48,0x85,0xD2,0xBA,0x01,0x00,0x00,0x00,0x74,0xDD,0x8B,0x49,0x1D,0xC7,0x04,0x08,0x01,0x00,0x00,0x00,0xF6,0x87,0x72,0x0F,0x00,0x00,0x20};
+				static const uint8_t loadBlock[] {0x48,0x8B,0x7B,0x10,0x48,0x8B,0x4B,0x28,0x48,0x8B,0x87,0x40,0x12,0x00,0x00,0x31,0xD2,0x8D,0x34,0xD5,0x00,0x00,0x00,0x00,0x03,0x71,0x19,0x8B,0x5C,0xD5,0xC0,0x89,0x1C,0x30,0x8B,0x5C,0xD5,0xC4,0x89,0x5C,0x30,0x04,0x48,0x85,0xD2,0xBA,0x01,0x00,0x00,0x00,0x74,0xDD,0x8B,0x49,0x1D,0xC7,0x04,0x08,0x01,0x00,0x00,0x00,0xF6,0x87,0x72,0x0F,0x00,0x00,0x20};
 				auto loadSite=reinterpret_cast<uint8_t *>(address+0x3AA02);
 				hostOK=hostOK && size>0x3AA47 && !memcmp(loadSite,loadBlock,sizeof(loadBlock));
 				if (hostOK) hostOK=patcher.routeMultiple(index,host,arrsize(host),address,size);
@@ -12776,14 +12838,14 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
                 // readers and service consumer before installing retry ownership.
                 if(hostOK) {
                  const char *symbol="__ZN17IGInterruptBridge22readAndClearInterruptsER8IGBitSetILm46EE";
-                 const uint8_t head[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53};
-                 const uint8_t tail[]={0x44,0x89,0xb8,0x1c,0,0x19,0};
+                 static const uint8_t head[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53};
+                 static const uint8_t tail[]={0x44,0x89,0xb8,0x1c,0,0x19,0};
                  const char *readers[]={
                   "__ZN17IGInterruptBridge25readAndClearRCSInterruptsER8IGBitSetILm46EEj",
                   "__ZN17IGInterruptBridge25readAndClearCCSInterruptsER8IGBitSetILm46EEj",
                   "__ZN17IGInterruptBridge25readAndClearBCSInterruptsER8IGBitSetILm46EEj",
                   "__ZN17IGInterruptBridge25readAndClearGuCInterruptsER8IGBitSetILm46EEj"};
-                 const uint32_t offsets[]={0x4b0c0,0x4b116,0x4b16c,0x4b1c2};
+                 static const uint32_t offsets[]={0x4b0c0,0x4b116,0x4b16c,0x4b1c2};
                  hostOK=size>0x4B480 &&
                   patcher.solveSymbol<mach_vm_address_t>(index,symbol,address,size)==address+0x4AFF0 &&
                   !memcmp(reinterpret_cast<void *>(address+0x4AFF0),head,sizeof(head)) &&
@@ -12828,39 +12890,15 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 				if (hostOK)
 					hostOK=installTGLCSB12(patcher,index,address,size);
 			}
-            if(rplsMemoryAdmitted) {
-             rplsRuntimeReady=rplsRuntimeReady && hostOK;
-             auto root=IORegistryEntry::getRegistryRoot();
-             root->setProperty("WEXRPLSRuntimeRCSReady",rplsRuntimeReady);
-             rplsOutgoingReady=rplsRuntimeReady && rplsOutgoingInstall(patcher,index,address,size);
-             root->setProperty("WEXRPLSOutgoingReady",rplsOutgoingReady);
-             if(auto live=OSSerializer::forTarget(nullptr,rplsOutgoingInstallSerialize)) {
-              root->setProperty("WEXRPLSOutgoingInstall",live);live->release();
-             }
-             if(auto live=OSSerializer::forTarget(nullptr,rplsOutgoingSerialize)) {
-              root->setProperty("WEXRPLSOutgoingLifetime",live);live->release();
-             }
-             if(auto live=OSSerializer::forTarget(nullptr,rplsRuntimeSerialize)) {
-              root->setProperty("WEXRPLSRuntimeRCSState",live);live->release();
-             }
-             if(auto live=OSSerializer::forTarget(nullptr,tglExecutionSerialize,reinterpret_cast<void *>(1))) {
-              root->setProperty("WEXRPLSRuntimeRCSExecution",live);live->release();
-             }
-             if(auto live=OSSerializer::forTarget(nullptr,tglSubmitCaptureSerialize)) {
-              root->setProperty("WEXRPLSRuntimeRCSSubmit",live);live->release();
-             }
-             if(auto live=OSSerializer::forTarget(nullptr,tglFaultSerialize,reinterpret_cast<void *>(1))) {
-              root->setProperty("WEXRPLSRuntimeRCSFault",live);live->release();
-             }
-            }
+            if(rplsMemoryAdmitted)publishRPLSRuntime(patcher,index,address,size,hostOK);
             if(adlnDetected && checkKernelArgument("-wex-adln-qtrace")) {
              const char *create="__ZN19IGAccelCommandQueue29createHardwareContextIfNeededEh";
              const char *process="__ZN19IGAccelCommandQueue20processCommandBufferEjj";
              const char *pid="__ZNK19IOAccelCommandQueue16getOwningTaskPidEv";
-             const uint8_t createHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x53,0x48,0x83,0xEC,0x18};
-             const uint8_t processHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x53,0x50,0x48,0x89,0xFB};
-             const uint8_t pidBody[] {0x55,0x48,0x89,0xE5,0x8B,0x87,0x78,0x05,0,0,0x5D,0xC3};
-             const uint8_t contextStore[] {0x48,0x89,0x83,0xA8,6,0,0};
+             static const uint8_t createHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x53,0x48,0x83,0xEC,0x18};
+             static const uint8_t processHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x53,0x50,0x48,0x89,0xFB};
+             static const uint8_t pidBody[] {0x55,0x48,0x89,0xE5,0x8B,0x87,0x78,0x05,0,0,0x5D,0xC3};
+             static const uint8_t contextStore[] {0x48,0x89,0x83,0xA8,6,0,0};
              bool ready=hostOK && tglVM.enabled && tglVM.nofault && size>0x3007D &&
               patcher.solveSymbol<mach_vm_address_t>(index,create,address,size)==address+0x2FD32 &&
               patcher.solveSymbol<mach_vm_address_t>(index,process,address,size)==address+0x2FF98 &&
@@ -12920,7 +12958,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// pending; appending the first copy there silently skips it.
 			// Preserve every native initialization/copy packet, including BBE.
 			const char *blitInit="__Z15blit3d_init_ctxP23IGHardwareBlit3DContext";
-			const uint8_t blitEnd[] {0x48,0xC7,0x83,0x60,0x08,0,0,0,0,0,0x05};
+			static const uint8_t blitEnd[] {0x48,0xC7,0x83,0x60,0x08,0,0,0,0,0,0x05};
 			bool blitInitOK=skuReady && size>0x355D2 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,blitInit,address,size)==address+0x31AFE &&
 				!memcmp(reinterpret_cast<void *>(address+0x3256C),blitEnd,sizeof(blitEnd)) &&
@@ -12954,7 +12992,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 
 			// Exact donor's post-relocation aux-state writer, before GPU submission.
 			const char *auxState="__ZN15IGAccelResource23fillSurfaceStateAuxInfoEPNS_17ResourceInfoEntryER22SGfxRenderSurfaceState6Intent";
-			const uint8_t auxHead[] {0x55,0x48,0x89,0xE5,0xF6,0x86,0x91,0,0,0,0x02,0x8B,0x42,0x18};
+			static const uint8_t auxHead[] {0x55,0x48,0x89,0xE5,0xF6,0x86,0x91,0,0,0,0x02,0x8B,0x42,0x18};
 			bool auxAlignOK=size>0x74078 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,auxState,address,size)==address+0x73FC2 &&
 				!memcmp(reinterpret_cast<void *>(address+0x73FC2),auxHead,sizeof(auxHead));
@@ -12976,9 +13014,9 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// and is independent of model, panel presence and connector routing.
 			const uint8_t iosCCSNative[] {0x45,0x88,0xBD,0x74,0x14,0,0,0x45,0x38,0xBD,0x8C,0x12,0,0,
 				0x75,0x0E,0x41,0xF6,0x06,0x20,0x74,0x08,0x41,0xC6,0x85,0x74,0x14,0,0,1};
-			const uint8_t iosCCSInitial[] {0x41,0xC6,0x85,0x74,0x14,0,0,0};
-			const uint8_t iosCCSSetNative[] {0x41,0x8A,0x07,0x41,0x88,0x86,0x74,0x14,0,0};
-			const uint8_t iosCCSSet[] {0x31,0xC0,0x90,0x41,0x88,0x86,0x74,0x14,0,0};
+			static const uint8_t iosCCSInitial[] {0x41,0xC6,0x85,0x74,0x14,0,0,0};
+			static const uint8_t iosCCSSetNative[] {0x41,0x8A,0x07,0x41,0x88,0x86,0x74,0x14,0,0};
+			static const uint8_t iosCCSSet[] {0x31,0xC0,0x90,0x41,0x88,0x86,0x74,0x14,0,0};
 			const char *iosCCSPlatform="__ZN16IntelAccelerator20callPlatformFunctionEPK8OSSymbolbPvS3_S3_S3_";
 			bool iosCCSOK=size>0x959E3 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,iosCCSPlatform,address,size)==address+0x2B4F2 &&
@@ -13010,7 +13048,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// to cover Vol2a p1129's conditional state-cache redirect requirement.
 			// Keep packet count, scratch writes, ISP, notification and wait fields.
 			// This is a repair candidate; concurrent execution is not yet proven.
-			const uint32_t flushSites[] {0x84E5D,0x85406,0x51A20,0x51A3A};
+			static const uint32_t flushSites[] {0x84E5D,0x85406,0x51A20,0x51A3A};
 			const uint8_t flushFind[][10] {
 				{0x48,0xB8,0x04,0x00,0x00,0x7A,0x21,0x50,0x10,0x40},
 				{0x48,0xB9,0x04,0x00,0x00,0x7A,0x21,0x50,0x10,0x40},
@@ -13024,7 +13062,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			bool flushOK=size>0x85410 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,"__ZN24IGHardwareRingBufferMain18commitStampCommandEjb",address,size)==address+0x84DC8 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,"__ZN24IGHardwareRingBufferMain10writeFlushEv",address,size)==address+0x853A6;
-			const uint8_t renderFlushWait[] {0x48,0xBB,0x04,0x00,0x00,0x7A,0x98,0x44,0x10,0x00};
+			static const uint8_t renderFlushWait[] {0x48,0xBB,0x04,0x00,0x00,0x7A,0x98,0x44,0x10,0x00};
 			flushOK=flushOK &&
 				patcher.solveSymbol<mach_vm_address_t>(index,"__ZN23IntelMTLRenderFunctions7executeEN14IntelMTLRender7eTokensER19IGAccelCommandQueueR26IGAccelSegmentResourceListRK20IOAccelKernelCommandR24IGAccelCommandDescriptorR13IGHeapsAccessR22IOGraphicsAccelerator2R17IGHardwareContextR12IOAccelEvent",address,size)==address+0x4F1F0 &&
 				!memcmp(reinterpret_cast<void *>(address+0x51A3A),renderFlushWait,sizeof(renderFlushWait));
@@ -13053,7 +13091,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLTahoeDisabledTrials",tglTahoeDisabledTrials,32);
 			// Preserve native submission; use its one-shot force-restore flag only
 			// for a witnessed equal-tail resubmission of the active first item.
-			const uint8_t sameTailFlag[] {0x41,0x80,0xBD,0xC9,0,0,0,0,0x74,0x10,0x41,0xC6,0x85,0xC9,0,0,0,0,0x89,0xC8,0x83,0xC8,0x04,0x89,0x45,0xC0};
+			static const uint8_t sameTailFlag[] {0x41,0x80,0xBD,0xC9,0,0,0,0,0x74,0x10,0x41,0xC6,0x85,0xC9,0,0,0,0,0x89,0xC8,0x83,0xC8,0x04,0x89,0x45,0xC0};
 			tglSameTailEnabled=tahoeTrialScope && hostOK && size>0x7C5D7 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,"__ZN17IGHardwareContext14updateRingTailEj",address,size)==address+0x7C5B6 &&
 				!memcmp(reinterpret_cast<void *>(address+0x3A7B6),sameTailFlag,sizeof(sameTailFlag));
@@ -13076,7 +13114,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			}
 			bool completionCacheOK=!completionCacheRequested;
 			if(completionCacheRequested) {
-				const uint32_t completionCacheSites[] {0x84EA4,0x84F95};
+				static const uint32_t completionCacheSites[] {0x84EA4,0x84F95};
 				const uint8_t completionCacheFind[][10] {
 					{0x48,0xB8,0x04,0x00,0x00,0x7A,0x98,0x44,0x10,0x01},
 					{0x48,0xB8,0x04,0x00,0x00,0x7A,0x18,0x05,0x00,0x01}};
@@ -13099,15 +13137,15 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLCompletionConstAlternativeRequested",completionCacheRequested);
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLCompletionConstAlternativeReady",completionCacheRequested && completionCacheOK);
 			const char *cpsRestore="__ZN17IGHardwareContext20restoreFromSafeImageEv";
-			const uint8_t cpsRestoreHead[] {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50};
-			const uint8_t cpsRestoreCall[] {0x4c,0x89,0xef,0xe8,0x61,0x2,0x0,0x0};
+			static const uint8_t cpsRestoreHead[] {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50};
+			static const uint8_t cpsRestoreCall[] {0x4c,0x89,0xef,0xe8,0x61,0x2,0x0,0x0};
 			cpsOK=cpsOK && patcher.solveSymbol<mach_vm_address_t>(index,cpsRestore,address,size)==address+0x7C392 &&
 				!memcmp(reinterpret_cast<void *>(address+0x7C392),cpsRestoreHead,sizeof(cpsRestoreHead)) &&
 				!memcmp(reinterpret_cast<void *>(address+0x7C129),cpsRestoreCall,sizeof(cpsRestoreCall));
 			cpsOK=cpsOK && hostOK && gucOK;
 			patcher.clearError();
 			if(cpsOK) {
-				const uint8_t find[] {0x83,0xC8,1},replace[] {0x83,0xC8,5};
+				static const uint8_t find[] {0x83,0xC8,1},replace[] {0x83,0xC8,5};
 				auto site=reinterpret_cast<uint8_t *>(address+0x7C21D);
 				KernelPatcher::LookupPatch patch {currentGraphics,find,replace,sizeof(find),1};
 				patcher.applyLookupPatch(&patch,site,sizeof(find)+1);
@@ -13132,7 +13170,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			bool contextCacheOK=!contextCacheRequested;
 			if(contextCacheRequested) {
 				const char *init="__ZN17IGHardwareContext15initWithOptionsEP11IGAccelTaskRK23IGHardwareContextParamsh";
-				const uint8_t contextCacheHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x28};
+				static const uint8_t contextCacheHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x28};
 				contextCacheOK=cpsOK && hostOK && size>0x7C350 &&
 					patcher.solveSymbol<mach_vm_address_t>(index,init,address,size)==address+0x7B9D4 &&
 					!memcmp(reinterpret_cast<void *>(address+0x7B9D4),contextCacheHead,sizeof(contextCacheHead));
@@ -13172,7 +13210,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
             }
 			if(adlnDetected && checkKernelArgument("-wex-adln-golden-raw")) {
 				const char *copy="__ZNK17IGHardwareContext16copyContextImageEPP24IOBufferMemoryDescriptorS2_";
-				const uint8_t head[] {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18};
+				static const uint8_t head[] {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18};
 				bool ok=cpsOK && patcher.solveSymbol<mach_vm_address_t>(index,copy,address,size)==address+0x7C762 &&
 				 !memcmp(reinterpret_cast<void *>(address+0x7C762),head,sizeof(head));
 				patcher.clearError();
@@ -13201,10 +13239,10 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			const char *tlbSpace="__ZN24IGHardwareRingBufferMain16getFlushTLBSpaceEv";
 			const char *tlbWrite="__ZN24IGHardwareRingBufferMain13writeFlushTLBEv";
 			const char *ringWrite="__ZN20IGHardwareRingBuffer11writeBufferEPjj";
-			const uint8_t tlbSpaceBody[] {0x55,0x48,0x89,0xE5,0x48,0x8B,0x47,0x10,0x0F,0xBA,0xA0,0xD6,0x0F,0,0,0x10,0xB9,6,0,0,0,0xB8,0x0C,0,0,0,0x0F,0x43,0xC1,0x5D,0xC3};
-			const uint8_t tlbWriteHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x28};
-			const uint8_t tlbReserveCall[] {0xFF,0x90,0x50,0x01,0,0,0x44,0x01,0xE8,0x41,0xC6,0x46,0x6D,1};
-			const uint8_t tlbPendingCall[] {0x48,0xF7,0xD6,0x48,0x21,0xF7,0x48,0x89,0xBC,0xD0,0x40,0x13,0,0,0x49,0x8B,0x06,0x4C,0x89,0xF7,0xFF,0x90,0x60,1,0,0};
+			static const uint8_t tlbSpaceBody[] {0x55,0x48,0x89,0xE5,0x48,0x8B,0x47,0x10,0x0F,0xBA,0xA0,0xD6,0x0F,0,0,0x10,0xB9,6,0,0,0,0xB8,0x0C,0,0,0,0x0F,0x43,0xC1,0x5D,0xC3};
+			static const uint8_t tlbWriteHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xEC,0x28};
+			static const uint8_t tlbReserveCall[] {0xFF,0x90,0x50,0x01,0,0,0x44,0x01,0xE8,0x41,0xC6,0x46,0x6D,1};
+			static const uint8_t tlbPendingCall[] {0x48,0xF7,0xD6,0x48,0x21,0xF7,0x48,0x89,0xBC,0xD0,0x40,0x13,0,0,0x49,0x8B,0x06,0x4C,0x89,0xF7,0xFF,0x90,0x60,1,0,0};
 			bool tlbPreparserOK=hostOK && size>0x8520E &&
 				patcher.solveSymbol<mach_vm_address_t>(index,tlbSpace,address,size)==address+0x8507C &&
 				patcher.solveSymbol<mach_vm_address_t>(index,tlbWrite,address,size)==address+0x8509C &&
@@ -13232,10 +13270,10 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
             const char *semCanUse="__ZN20IGHardwareRingBuffer23canUseSemaphoreWaitPollEi";
             const char *semSpace="__ZN20IGHardwareRingBuffer25getSemaphoreWaitPollSpaceEi";
             const char *semCommand="__ZN20IGHardwareRingBuffer30insertSemaphoreWaitPollCommandEPKN26IGSemaphoreWaitBufferQueue29SemaphoreWaitBufferDescriptorE";
-            const uint8_t baseSpaceBody[] {0x55,0x48,0x89,0xe5,0x48,0x8b,0x47,0x10,0x8b,0x80,0xd6,0x0f,0,0,0xc1,0xe8,0x10,0x83,0xe0,1,0x8d,0x0c,0x80,0xb8,5,0,0,0,1,0xc8,0x5d,0xc3};
-            const uint8_t semSpaceBody[] {0x55,0x48,0x89,0xe5,0xe8,0x3f,0xfe,0xff,0xff,0x0f,0xb6,0xc0,0x8d,0x04,0xc0,0x5d,0xc3};
-            const uint8_t semCommandHead[] {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x83,0xec,0x30};
-            const uint8_t semMapCall[] {0xe8,0xcf,0x41,1,0,0x48,0x85,0xc0,0x74,0x0f,0x48,0x89,0xdf,0x48,0x89,0xc6,0xe8,0x45,0xfe,0xff,0xff};
+            static const uint8_t baseSpaceBody[] {0x55,0x48,0x89,0xe5,0x48,0x8b,0x47,0x10,0x8b,0x80,0xd6,0x0f,0,0,0xc1,0xe8,0x10,0x83,0xe0,1,0x8d,0x0c,0x80,0xb8,5,0,0,0,1,0xc8,0x5d,0xc3};
+            static const uint8_t semSpaceBody[] {0x55,0x48,0x89,0xe5,0xe8,0x3f,0xfe,0xff,0xff,0x0f,0xb6,0xc0,0x8d,0x04,0xc0,0x5d,0xc3};
+            static const uint8_t semCommandHead[] {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x83,0xec,0x30};
+            static const uint8_t semMapCall[] {0xe8,0xcf,0x41,1,0,0x48,0x85,0xc0,0x74,0x0f,0x48,0x89,0xdf,0x48,0x89,0xc6,0xe8,0x45,0xfe,0xff,0xff};
             bool semaphoreTLBOK=tlbPreparserOK &&
              patcher.solveSymbol<mach_vm_address_t>(index,baseSpace,address,size)==address+0x428EC &&
              patcher.solveSymbol<mach_vm_address_t>(index,baseWrite,address,size)==address+0x4290C &&
@@ -13266,7 +13304,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// r120: failure-path capture only. Native dumpBatchBuffer is a stub;
 			// reuse the native pending resource cache and saved debug registers.
 			const char *hangDump="__ZN20IGHardwareRingBuffer14dumpRingBufferER14debugRegisters";
-			const uint8_t hangHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50};
+			static const uint8_t hangHead[] {0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50};
 			bool hangOK=tglVM.nofault && size>0x46780 &&
 				patcher.solveSymbol<mach_vm_address_t>(index,hangDump,address,size)==address+0x4657C &&
 				!memcmp(reinterpret_cast<void *>(address+0x4657C),hangHead,sizeof(hangHead));
@@ -13290,8 +13328,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
             // Exact failure-only wake call. Native STOP, wake ownership and all
             // other callers remain unchanged; no instrumentation in normal submits.
             if((XELP::kernelOS(version)==XELP::OS::Tahoe)) {
-             const uint8_t before[] {0x41,0x89,0xf6,0x49,0x89,0xff,0x48,0x8b,0x7f,0x10,0xbe,1,0,0,0,0xba,7,0,0,0,0xe8,0x8e,0x22,0xfd,0xff};
-             const uint8_t stop[] {0x42,0xc7,0x04,0x20,1,0,1,0};
+             static const uint8_t before[] {0x41,0x89,0xf6,0x49,0x89,0xff,0x48,0x8b,0x7f,0x10,0xbe,1,0,0,0,0xba,7,0,0,0,0xe8,0x8e,0x22,0xfd,0xff};
+             static const uint8_t stop[] {0x42,0xc7,0x04,0x20,1,0,1,0};
              bool ok=hangOK && size>0x569c6 &&
               patcher.solveSymbol<mach_vm_address_t>(index,"__ZN11IGScheduler19haltCommandStreamerE10IGHwCsType",address,size)==address+0x56978 &&
               !memcmp(reinterpret_cast<void *>(address+0x56983),before,sizeof(before)) &&
@@ -13327,12 +13365,12 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					0x49,0x8B,0x76,0x20,0x48,0x8B,0x9E,0xB8,0,0,0};
 				const uint8_t failedAndResume[] {0xFF,0x83,0x7C,0x01,0,0,0x49,0x8B,0x47,0x18,0x48,0x8B,0xB8,0x50,0x12,0,0,
 					0x48,0x8B,0x07,0xFF,0x90,0x80,0x01,0,0};
-				const uint8_t successDispatch[] {0xFF,0x90,0x68,0x01,0,0,0x84,0xC0,0x74,0x09,0x41,0x80,0x7E,0x40,0,0x74,0x08,0xEB,0x72};
+				static const uint8_t successDispatch[] {0xFF,0x90,0x68,0x01,0,0,0x84,0xC0,0x74,0x09,0x41,0x80,0x7E,0x40,0,0x74,0x08,0xEB,0x72};
 				const uint8_t successPath[] {0x49,0x8B,0x47,0x18,0x48,0x8B,0xB8,0x50,0x12,0,0,0x48,0x8B,0x07,0xFF,0x90,0x80,0x01,0,0,
 					0x48,0x85,0xDB,0x74,0xDA,0x49,0x8B,0x47,0x18,0x48,0x8B,0xB8,0x80,0x03,0,0,0x8B,0x73,0x20,0x48,0x8B,0x07,0xFF,0x90,0xD8,0x01,0,0,
 					0x48,0x89,0xDF,0xE8,0xFD,0xF9,0xFF,0xFF,0x8B,0x93,0x78,0x01,0,0,0x48,0x8D,0x75,0xD8,0x4C,0x89,0xF7,0xB9,0x40,0x42,0x0F,0,
 					0xE8,0xC4,0x54,0xFF,0xFF,0x84,0xC0,0x74,0xA0,0xFF,0x83,0x7C,0x01,0,0,0xEB,0x98};
-				const uint8_t submitHead[] {0x55,0x48,0x89,0xE5,0x41,0x56,0x53,0x48,0x83,0xEC,0x10,0x48,0x8B,0x47,0x18,0xF6,0x80,0x78,0x0C,0,0,0x02};
+				static const uint8_t submitHead[] {0x55,0x48,0x89,0xE5,0x41,0x56,0x53,0x48,0x83,0xEC,0x10,0x48,0x8B,0x47,0x18,0xF6,0x80,0x78,0x0C,0,0,0x02};
 				const auto submit=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN18IGAccelFIFOChannel18submitStampCommandEv",address,size);
 				// hostOK already qualifies and routes this exact sleep entry. Call
 				// the routed entry, as the native E8 does, not the saved trampoline.
@@ -13346,39 +13384,8 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					!memcmp(reinterpret_cast<void *>(address+0x4CAD1),successPath,sizeof(successPath)) &&
 					!memcmp(reinterpret_cast<void *>(submit),submitHead,sizeof(submitHead));
 				patcher.clearError();
-				if (recoveryOK && !checkKernelArgument("-wex-mps-intel-off") && !MPSIntel::cpuHasSGX()) {
-					auto &m=mpsIntel;
-					m.taskInfo=reinterpret_cast<MPSIntelState::TaskInfo>(patcher.solveSymbol(KernelPatcher::KernelID,"_task_info"));
-					m.copyIn=reinterpret_cast<MPSIntelState::CopyIn>(patcher.solveSymbol(KernelPatcher::KernelID,"_copyin"));
-					m.currentTask=reinterpret_cast<MPSIntelState::CurrentTask>(patcher.solveSymbol(KernelPatcher::KernelID,"_current_task"));
-					m.taskPmap=reinterpret_cast<MPSIntelState::TaskPmap>(patcher.solveSymbol(KernelPatcher::KernelID,"_get_task_pmap"));
-					m.findPhys=reinterpret_cast<MPSIntelState::FindPhys>(patcher.solveSymbol(KernelPatcher::KernelID,"_pmap_find_phys"));
-					m.physWrite=reinterpret_cast<MPSIntelState::PhysWrite>(patcher.solveSymbol(KernelPatcher::KernelID,"_ml_phys_write_byte_64"));
-					patcher.clearError();
-					bool mpsOK=m.taskInfo && m.copyIn && m.currentTask && m.taskPmap && m.findPhys && m.physWrite &&
-						patcher.solveSymbol<mach_vm_address_t>(index,"__ZN11IGAccelTask15initWithOptionsEP16IntelAccelerator",address,size)==address+0x788C;
-					patcher.clearError();
-					if (mpsOK) {
-						KernelPatcher::RouteRequest shared {"__ZN11IGAccelTask15initWithOptionsEP16IntelAccelerator",wrapMPSIntelTask,orgMPSIntelTask};
-						mpsOK=patcher.routeMultiple(index,&shared,1,address,size);patcher.clearError();
-					}
-					IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSIntelFixReady",mpsOK);
-					if (mpsOK) if (auto st=OSSerializer::forTarget(nullptr,mpsIntelSerialize)) {
-						IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSIntelFix",st);st->release();
-					}
-					// MPSGraph stitching off: the TGL compiler miscompiles stitched convolutions.
-					m.graphEnabled=mpsOK && !checkKernelArgument("-wex-mpsgraph-stitching-on");
-					IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSGraphStitchingOffReady",m.graphEnabled);
-					if (m.graphEnabled) if (auto st=OSSerializer::forTarget(nullptr,mpsGraphSerialize)) {
-						IORegistryEntry::getRegistryRoot()->setProperty("WEXMPSGraphStitchingOff",st);st->release();
-					}
-					// The TGL Metal driver fix shares this task hook and helpers.
-					mtlDriverFix.enabled=mpsOK && !checkKernelArgument("-wex-mtl-driver-fix-off");
-					IORegistryEntry::getRegistryRoot()->setProperty("WEXMTLDriverFixReady",mtlDriverFix.enabled);
-					if (mtlDriverFix.enabled) if (auto st=OSSerializer::forTarget(nullptr,mtlDriverFixSerialize)) {
-						IORegistryEntry::getRegistryRoot()->setProperty("WEXMTLDriverFix",st);st->release();
-					}
-				}
+				if (recoveryOK && !checkKernelArgument("-wex-mps-intel-off") && !MPSIntel::cpuHasSGX())
+					installMPSIntelFix(patcher,index,address,size);
 				if (recoveryOK) {
 					// The native poll loses GDRST bits above bit 7 and can wait
 					// indefinitely. Preserve its exact entry/continuations, including
@@ -13408,7 +13415,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 				if (recoveryOK && !checkKernelArgument("-wex-no-stamp-orphan")) {
 					// Exact donor: eventTimeout@15F22 with the stamp->engine LUT leas at +0x3B/+0x45.
 					const char *timeout="__ZN19IGAccelEventMachine12eventTimeoutEi";
-					const uint8_t head[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x41,0x89,0xf5};
+					static const uint8_t head[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x41,0x89,0xf5};
 					auto t=patcher.solveSymbol<mach_vm_address_t>(index,timeout,address,size);
 					patcher.clearError();
 					const uint8_t *tb=reinterpret_cast<const uint8_t *>(t);
