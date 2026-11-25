@@ -56,6 +56,15 @@ jobs:
           python3 tools/package.py --build build/RELEASE --configuration RELEASE --tag "$RELEASE_TAG"
           cd build/dist
           shasum -a 256 *.zip > SHA256SUMS
+      - name: Upload kexts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kexts
+          path: |
+            build/RELEASE/AppleIntelTGLCompat.kext
+            build/RELEASE/WhateverXe.kext
+            build/DEBUG/WhateverXe.kext
+          if-no-files-found: error
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
