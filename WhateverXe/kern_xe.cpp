@@ -14286,6 +14286,7 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 				IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGRouteScanoutPower", routed);
 				patcher.clearError();
 			}
+			routeRPLSPixelEncoding(patcher, index, address, size);
 			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN21AppleIntelDisplayPath31configurePipePostCSCGamma_10BitEP19FlipTransactionArgs10IGColorCtl", wrapTGLGamma10, orgTGLGamma10},
@@ -22037,6 +22038,40 @@ void XE::wrapTGLColorMode(void *controller, void *fb, void *path, uint32_t mode,
 	tglObserveScanout(fb, plane, 5, false, args);
 	FunctionCast(wrapTGLColorMode, callbackXE->orgTGLColorMode)(controller, fb, path, mode, depth, flag, timing);
 	tglObserveScanout(fb, plane, 5, true, args);
+}
+// setColorMode is not the only writer of the framebuffer colour mode (fb+0x45A8).
+// Every complete modeset (hotplug, display wake, mode change) runs hwSetMode,
+// which stores mapIOPixelEncodingToColorMode(timing pixel encoding) there
+// directly. With a YCbCr encoding that is 0x100, so configurePlane enables the
+// BT.709 RGB-to-YUV output CSC and enablePipe sets PIPE_MISC bit 11, while the AVI
+// InfoFrame still says RGB: the sink shows green or otherwise wrong colours.
+// enableController then reads PIPE_MISC bit 11 back on every display wake, so
+// the wrong state persists until reboot. The native function returns
+// table[encoding-1] for encodings 1, 2, 4 and 8 (1 for RGB, 0x100 for all three
+// YCbCr encodings) and 0 otherwise. Its prologue holds a RIP-relative counter, so
+// it is replaced outright: same validity, RGB for every encoding.
+static uint32_t rplsPixelEncodingForced[2] {};
+uint32_t XE::wrapRPLSPixelEncodingColorMode(void *, uint32_t encoding) {
+	if (encoding != 1 && encoding != 2 && encoding != 4 && encoding != 8) return 0;
+	if (encoding != 1) {
+		rplsPixelEncodingForced[0] = encoding;
+		rplsPixelEncodingForced[1] = __atomic_add_fetch(&rplsPixelEncodingForced[1], 1, __ATOMIC_RELAXED);
+		IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSPixelEncodingForcedRGB", rplsPixelEncodingForced, sizeof(rplsPixelEncodingForced));
+	}
+	return 1;
+}
+__attribute__((noinline)) void XE::routeRPLSPixelEncoding(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+	if (!adlsDisplaySelected || rplsAllowYCbCr) return;
+	static const char *name = "__ZN31AppleIntelFramebufferController29mapIOPixelEncodingToColorModeEj";
+	// push rbp; mov rbp,rsp; inc [rip+0x8F431]; dec esi; xor eax,eax; cmp esi,7
+	static const uint8_t entry[] {0x55,0x48,0x89,0xE5,0x48,0xFF,0x05,0x31,0xF4,0x08,0x00,0xFF,0xCE,0x31,0xC0,0x83,0xFE,0x07};
+	bool ready = false;
+	if (adlsDonorSymbol(patcher, index, address, size, name, 0x505FC, entry, sizeof(entry))) {
+		KernelPatcher::RouteRequest route(name, wrapRPLSPixelEncodingColorMode);
+		ready = patcher.routeMultiple(index, &route, 1, address, size);
+		patcher.clearError();
+	}
+	IORegistryEntry::getRegistryRoot()->setProperty("WEXRPLSPixelEncodingRouteReady", ready);
 }
 uint32_t XE::wrapTGLPixelInfo(void *fb, int mode, int depth, int aperture, void *info) {
 	const auto result = FunctionCast(wrapTGLPixelInfo, callbackXE->orgTGLPixelInfo)(fb, mode, depth, aperture, info);

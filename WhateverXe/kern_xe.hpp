@@ -161,6 +161,7 @@ private:
     bool routeADLSHDMILink(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
     void installMPSIntelFix(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
     void publishRPLSRuntime(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size,bool hostOK);
+    void routeRPLSPixelEncoding(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
     bool adlsHDMIDeepColor {};
     bool adlsKeepPreCSCGamma {};
     mach_vm_address_t orgADLSOnlineInfo {},orgADLSSetupClocks {},orgADLSPllDivisors {};
@@ -611,6 +612,7 @@ private:
 
 	static void wrapTGLPlaneSetup(void *plane, void *path);
 	static void wrapTGLColorMode(void *controller, void *fb, void *path, uint32_t mode, uint32_t depth, bool flag, const void *timing);
+	static uint32_t wrapRPLSPixelEncodingColorMode(void *controller, uint32_t encoding);
 	static uint32_t wrapTGLPixelInfo(void *fb, int mode, int depth, int aperture, void *info);
 	static bool wrapTGLScanoutAllocate(void *fb);
 	static void wrapTGLScanoutSetup(void *fb);
