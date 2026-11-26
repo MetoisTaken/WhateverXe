@@ -176,8 +176,12 @@ struct Wiring {
             if(shared)continue;
             (isDP?out.dp:out.hdmi)|=1U<<d;out.pin[d]=bus;out.excluded&=~(1U<<d);
         }
+        // A firmware DDI A that no backend selects (e.g. a plain DP connector)
+        // is no panel either. Keeping the donor's built-in panel connector on
+        // it makes allocatePath() reserve pipe A for that phantom panel, so a
+        // hotplugged external display moves to pipe B.
         out.excludeDonorPanel=ports.externalOnly && !ports.unmapped &&
-            !ports.panel.valid && !(ports.present&1) && !out.panel;
+            !ports.panel.valid && !(out.selected()&1) && !out.panel;
         out.valid=true;return out;
     }
 };

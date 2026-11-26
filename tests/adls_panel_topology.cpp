@@ -123,6 +123,14 @@ int main() {
         assert(a.externalOnly && !aw.excludeDonorPanel && (aw.hdmi&1));
         Platform aOut;assert(aw.apply(aOut.data(),sizeof(aOut)));
         assert(aOut.config(0)[4]==0x800 && aOut.config(0)[5]==0x202);
+        // A firmware DP on A that no backend selects is not a panel either:
+        // the donor panel connector must not keep pipe A reserved for it.
+        auto unusedA=children;unusedA[0]={0x68C6,10,0,0x40,0xC0,0};
+        const auto uBytes=table(unusedA);const auto u=parse(uBytes.data(),uBytes.size(),family);
+        const auto uw=AlderLakeS::Wiring::fromFirmware(u);
+        assert(u.externalOnly && (u.present&1) && !(uw.selected()&1) && uw.excludeDonorPanel);
+        Platform uOut;assert(uw.apply(uOut.data(),sizeof(uOut)));
+        assert(uOut.config(0)[4]==1 && !uOut.config(0)[5]);
         // Preserve existing connector admission with a stale checksum or an
         // unrelated malformed tail; this certificate covers only complete GD.
         auto tail=bytes;tail.push_back(58);tail.push_back(2);tail.push_back(0);tail.push_back(0);
